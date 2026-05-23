@@ -12,8 +12,9 @@ Built for LLM-driven workflows that need API-based code access (no on-disk clone
 
 - `@verevoir/sources` — core types, the `SourceAdapter` contract, the `SourceApiError` class, and the `envFromProcessEnv` helper. No source dependency.
 - `@verevoir/sources/github` — GitHub REST + Git Data adapter. Uses native `fetch`, no SDK dependency.
+- `@verevoir/sources/fs` — local filesystem adapter. `repoUrl` is a local directory path. No auth, no API. Reads/lists/walks/writes; fork + PR throw 501 (not applicable to a local filesystem).
 
-Future adapters land alongside (`@verevoir/sources/gitlab`, `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`) under the same contract.
+Future adapters land alongside (`@verevoir/sources/gitlab`, `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`, `@verevoir/sources/notion`) under the same contract.
 
 ## Install
 
@@ -23,7 +24,7 @@ npm install @verevoir/sources
 
 No mandatory peer dependencies — the GitHub adapter uses native `fetch`.
 
-## Canonical usage
+## Canonical usage — GitHub
 
 ```ts
 import { envFromProcessEnv } from '@verevoir/sources';
@@ -55,6 +56,33 @@ const prUrl = await openPullRequest(
   'Body of the PR.'
 );
 ```
+
+## Canonical usage — Local filesystem
+
+Same contract; no auth required. `repoUrl` is interpreted as a directory path.
+
+```ts
+import { readFile, listFiles, getRepoTree, writeFile } from '@verevoir/sources/fs';
+
+const env = { token: '', forkOrg: '' }; // FS adapter ignores both
+
+// Walk the working tree (skipping node_modules, .git, dist, etc.).
+const tree = await getRepoTree(env, '/path/to/project');
+console.log(`${tree.entries.filter((e) => e.type === 'blob').length} files`);
+
+// Read + write the same way as GitHub.
+const readme = await readFile(env, '/path/to/project', 'README.md');
+await writeFile(
+  env,
+  '/path/to/project',
+  'docs/notes.md',
+  '# Notes\n',
+  'ignored', // FS adapter ignores branch
+  'ignored' // FS adapter ignores commit message
+);
+```
+
+`ensureFork` and `openPullRequest` throw 501 on the FS adapter — there's no local-FS equivalent. The customer manages git operations themselves.
 
 ## Fork-pivot pattern
 
