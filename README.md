@@ -13,6 +13,7 @@ Built for LLM-driven workflows that need API-based code access (no on-disk clone
 - `@verevoir/sources` — core types, the `SourceAdapter` contract, the `SourceApiError` class, and the `envFromProcessEnv` helper. No source dependency.
 - `@verevoir/sources/github` — GitHub REST + Git Data adapter. Uses native `fetch`, no SDK dependency.
 - `@verevoir/sources/fs` — local filesystem adapter. `repoUrl` is a local directory path. No auth, no API. Reads/lists/walks/writes; fork + PR throw 501 (not applicable to a local filesystem).
+- `@verevoir/sources/trello` — Trello board adapter. `repoUrl` is a board URL (`https://trello.com/b/<boardId>`). Lists are dirs; cards are files. Auth via integration-token packed into `SourceEnv.token` as `"<apiKey>:<apiToken>"`.
 
 Future adapters land alongside (`@verevoir/sources/gitlab`, `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`, `@verevoir/sources/notion`) under the same contract.
 
@@ -83,6 +84,48 @@ await writeFile(
 ```
 
 `ensureFork` and `openPullRequest` throw 501 on the FS adapter — there's no local-FS equivalent. The customer manages git operations themselves.
+
+## Canonical usage — Trello
+
+Board > List > Card. Lists are dirs; cards are files. Auth uses an integration token (API key + API token) packed together.
+
+```ts
+import { envFromTrelloProcessEnv } from '@verevoir/sources/trello';
+import { readFile, writeFile, listFiles } from '@verevoir/sources/trello';
+
+// Set TRELLO_API_KEY + TRELLO_API_TOKEN in your environment.
+const env = envFromTrelloProcessEnv();
+if (!env) throw new Error('TRELLO_API_KEY or TRELLO_API_TOKEN not set');
+
+const boardUrl = 'https://trello.com/b/abc123/my-board';
+
+// Read a card's description (already markdown).
+const { content, sha } = await readFile(env, boardUrl, '<cardId>');
+
+// Read all comments on a card, rendered as markdown blocks.
+const { content: comments } = await readFile(env, boardUrl, '<cardId>/comments');
+
+// Update a card's description.
+await writeFile(env, boardUrl, '<cardId>', '# Updated\n\nNew body.', 'board', '');
+
+// Post a new comment on a card.
+await writeFile(env, boardUrl, '<cardId>/comments', 'LGTM!', 'board', '');
+
+// List all lists on the board ('' prefix → lists as DirEntry[]).
+const lists = await listFiles(env, boardUrl, '');
+
+// List cards in a specific list (<listId> prefix → cards as DirEntry[]).
+const cards = await listFiles(env, boardUrl, lists[0].path);
+```
+
+**Path conventions:**
+
+- `<cardId>` — the card's description. `readFile` returns `.desc`; `writeFile` updates it.
+- `<cardId>/comments` — the card's comment thread. `readFile` renders all comments as markdown; `writeFile` posts a new comment (does not replace existing ones).
+- `''` as `listFiles` prefix — returns the board's lists.
+- `<listId>` as `listFiles` prefix — returns cards in that list.
+
+`ensureBranch` is a no-op. `ensureFork` and `openPullRequest` throw 501.
 
 ## Fork-pivot pattern
 

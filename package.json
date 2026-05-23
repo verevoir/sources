@@ -1,6 +1,6 @@
 {
   "name": "@verevoir/sources",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Source-adapter primitive: a contract over remote + local file sources (read/list/tree/write/branch/fork/PR) with implementations as subpath imports. GitHub + local FS today; GitLab, Bitbucket, S3, Notion follow.",
   "license": "Apache-2.0",
   "type": "module",
@@ -18,6 +18,10 @@
     "./fs": {
       "types": "./dist/fs/index.d.ts",
       "import": "./dist/fs/index.js"
+    },
+    "./trello": {
+      "types": "./dist/trello/index.d.ts",
+      "import": "./dist/trello/index.js"
     }
   },
   "files": [
