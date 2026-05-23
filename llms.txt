@@ -1,0 +1,89 @@
+# @verevoir/sources
+
+Source-adapter primitive: a contract over remote file sources (read/write/branch/fork/PR) with implementations as subpath imports.
+
+## Purpose
+
+Lets a downstream project read and write files in remote repositories without coupling to a specific source-host SDK. Pick the source via a subpath import; unused implementations do not enter your bundle.
+
+Built for LLM-driven workflows that need API-based code access — no on-disk clones, no resident language servers. The companion package `@verevoir/context` layers an in-process cache + symbol index on top of these reads.
+
+## Subpaths
+
+- `@verevoir/sources` — core types and the `SourceAdapter` contract. No source dependency.
+- `@verevoir/sources/github` — GitHub REST + Git Data adapter. Native `fetch`, no SDK dependency.
+
+Future: `@verevoir/sources/gitlab`, `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`.
+
+## Install
+
+```bash
+npm install @verevoir/sources
+```
+
+No mandatory peer dependencies — the GitHub adapter uses native `fetch`.
+
+## Canonical usage
+
+```ts
+import { envFromProcessEnv } from '@verevoir/sources';
+import { readFile, writeFile, openPullRequest } from '@verevoir/sources/github';
+
+const env = envFromProcessEnv();
+if (!env) throw new Error('GITHUB_TOKEN not set');
+
+const { content } = await readFile(
+  env,
+  'https://github.com/acme/charts',
+  'README.md',
+);
+
+await writeFile(
+  env,
+  'https://github.com/acme/charts',
+  'docs/notes.md',
+  '# Notes\n',
+  'feature/notes',
+  'Add notes',
+);
+
+const prUrl = await openPullRequest(
+  env,
+  'https://github.com/acme/charts',
+  'feature/notes',
+  'main',
+  'Add docs/notes.md',
+  'Body of the PR.',
+);
+```
+
+## The contract
+
+```ts
+readFile(env, repoUrl, path, ref?) → Promise<{ content, sha }>
+listFiles(env, repoUrl, prefix, ref?) → Promise<DirEntry[]>
+getRepoTree(env, repoUrl, ref?) → Promise<RepoTree>
+writeFile(env, repoUrl, path, content, branch, message) → Promise<void>
+ensureBranch(env, repoUrl, branch) → Promise<void>
+ensureFork(env, upstreamUrl) → Promise<string>
+openPullRequest(env, target, head, base, title, body) → Promise<string>
+getDefaultBranch(env, repoUrl) → Promise<string>
+```
+
+## Fork-pivot
+
+When `writeFile` to an upstream returns 403, callers can `ensureFork`, retry the write against the fork, and `openPullRequest` against the upstream. The fork-pivot pattern is documented in the README; v0 callers implement it inline.
+
+## Errors
+
+`SourceApiError` is thrown on transport / API failures. `status` carries the HTTP status when present. 404 is the conventional "ref / path doesn't exist" signal.
+
+## What this is NOT
+
+- Not an Octokit replacement. Functions cover the SourceAdapter shape; SDK-specific features (issues, releases) stay on the source's own SDK.
+- Not a sync engine. Each call is independent; no local working tree.
+- Not a language-aware index. Symbol extraction + content cache live in `@verevoir/context` on top.
+
+## License
+
+Apache-2.0.

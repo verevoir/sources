@@ -1,0 +1,50 @@
+{
+  "name": "@verevoir/sources",
+  "version": "0.1.0",
+  "description": "Source-adapter primitive: a contract over remote file sources (read/write/branch/fork/PR) with implementations as subpath imports. GitHub today; GitLab, Bitbucket, S3 follow.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./github": {
+      "types": "./dist/github/index.d.ts",
+      "import": "./dist/github/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "llms.txt",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "prettier --check .",
+    "format": "prettier --write .",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "prettier": "^3",
+    "typescript": "^5",
+    "vitest": "^4"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/verevoir/sources.git"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
