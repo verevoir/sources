@@ -78,6 +78,25 @@ export interface SourceAdapter {
   readFile(env: SourceEnv, repoUrl: string, path: string, ref?: string): Promise<ReadFileResult>;
   listFiles(env: SourceEnv, repoUrl: string, prefix: string, ref?: string): Promise<DirEntry[]>;
   getRepoTree(env: SourceEnv, repoUrl: string, ref?: string): Promise<RepoTree>;
+  /** Cheap freshness check used by cache layers. Asks "is the
+   * `version` handle the caller is holding still the live one for
+   * this `(repoUrl, path, ref)`?". Returns true when current; false
+   * when the source has moved (including when the path no longer
+   * resolves). The `version` is whatever the corresponding adapter
+   * returned as `sha` from `readFile`.
+   *
+   * Adapters use the cheapest backend-native primitive available:
+   * blob-sha compare for git sources, content-hash compare for FS,
+   * `last_edited_time` / `dateLastActivity` for SaaS sources. The
+   * cache layer in `@verevoir/context` gates this behind a TTL so
+   * tight read loops don't hammer the upstream. */
+  isFresh(
+    env: SourceEnv,
+    repoUrl: string,
+    path: string,
+    version: string,
+    ref?: string
+  ): Promise<boolean>;
   writeFile(
     env: SourceEnv,
     repoUrl: string,
