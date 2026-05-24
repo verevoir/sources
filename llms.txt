@@ -12,8 +12,9 @@ Built for LLM-driven workflows that need API-based code access — no on-disk cl
 
 - `@verevoir/sources` — core types and the `SourceAdapter` contract. No source dependency.
 - `@verevoir/sources/github` — GitHub REST + Git Data adapter. Native `fetch`, no SDK dependency.
+- `@verevoir/sources/fs` — local filesystem adapter. `repoUrl` is a directory path. No auth. `ensureFork` and `openPullRequest` throw 501 (not applicable).
 
-Future: `@verevoir/sources/gitlab`, `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`.
+Future: `@verevoir/sources/gitlab`, `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`, `@verevoir/sources/notion`.
 
 ## Install
 

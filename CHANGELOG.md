@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0 — 2026-05-23
+
+- **New: `@verevoir/sources/fs`** — local filesystem adapter implementing the SourceAdapter contract. `repoUrl` is interpreted as a directory path. No auth, no API. `readFile` / `listFiles` / `getRepoTree` / `writeFile` work; `ensureFork` / `openPullRequest` throw 501 (not applicable to a local filesystem). Validates the SourceAdapter contract against a second source kind.
+- New example: `examples/fs-read-and-tree.ts`.
+
 ## 0.1.0 — 2026-05-23
 
 Initial release.
