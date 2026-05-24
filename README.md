@@ -8,6 +8,12 @@ Lets a downstream project read and write files in remote repositories without co
 
 Built for LLM-driven workflows that need API-based code access (no on-disk clones, no resident language servers). The companion package [`@verevoir/context`](https://github.com/verevoir/context) layers an in-process cache + symbol index on top of these reads.
 
+## Most consumers reach this via MCP
+
+If you're driving an LLM agent (Claude Code, custom Anthropic-SDK app, etc.) and want these source operations as tools, you usually don't import `@verevoir/sources` directly — you run the [`@verevoir/mcp`](https://github.com/verevoir/mcp) server, which wraps this contract (via the cached drop-ins from [`@verevoir/context`](https://github.com/verevoir/context)) and exposes `read_file`, `list_files`, `get_repo_tree`, `grep`, `find_symbol`, `write_file` as MCP tools. See that package's README for Claude Code configuration; the key recommendation is `"alwaysLoad": true` so the tools surface as first-class instead of being deferred behind `ToolSearch`.
+
+Direct in-process consumption (the usage shown below) is for: writing your own MCP server, embedding the source surface inside a non-MCP runtime (e.g. server-side action handlers), or building higher-level libraries that compose with adapters.
+
 ## Subpaths
 
 - `@verevoir/sources` — core types, the `SourceAdapter` contract, the `SourceApiError` class, and the `envFromProcessEnv` helper. No source dependency.

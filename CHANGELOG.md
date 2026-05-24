@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 — 2026-05-24
+
+- Docs: README + llms.txt gain a "Most consumers reach this via MCP" section pointing at `@verevoir/mcp` and the `alwaysLoad: true` Claude Code config. Clarifies that direct in-process use is for advanced cases (writing your own MCP server, composing adapters in libraries).
+
 ## 0.3.0 — 2026-05-24
 
 - **Contract: `isFresh(env, repoUrl, path, version, ref?)`** added to `SourceAdapter`. Cache layers ask the source whether a held `version` (the `sha` from a prior `readFile`) is still the live one. Returns `true` when current, `false` when the source has moved (including 404 / file removed). Pairs with the `wrapWithCache` validation TTL in `@verevoir/context`.
