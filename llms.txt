@@ -64,6 +64,7 @@ const prUrl = await openPullRequest(
 readFile(env, repoUrl, path, ref?) → Promise<{ content, sha }>
 listFiles(env, repoUrl, prefix, ref?) → Promise<DirEntry[]>
 getRepoTree(env, repoUrl, ref?) → Promise<RepoTree>
+isFresh(env, repoUrl, path, version, ref?) → Promise<boolean>  // cheap "is held version still current?" check used by cache layers
 writeFile(env, repoUrl, path, content, branch, message) → Promise<void>
 ensureBranch(env, repoUrl, branch) → Promise<void>
 ensureFork(env, upstreamUrl) → Promise<string>

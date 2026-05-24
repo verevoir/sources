@@ -6,6 +6,7 @@ import {
   readFile,
   listFiles,
   getRepoTree,
+  isFresh,
   writeFile,
   ensureBranch,
   ensureFork,
@@ -143,6 +144,29 @@ describe('writeFile', () => {
     await expect(
       writeFile(env, root, '../escape.txt', 'evil', 'ignored', 'ignored')
     ).rejects.toBeInstanceOf(SourceApiError);
+  });
+});
+
+describe('isFresh', () => {
+  it('returns true when version matches current content sha', async () => {
+    await fsPromises.writeFile(join(root, 'a.txt'), 'hello', 'utf8');
+    const { sha } = await readFile(env, root, 'a.txt');
+    await expect(isFresh(env, root, 'a.txt', sha)).resolves.toBe(true);
+  });
+
+  it('returns false when content has changed since the version was recorded', async () => {
+    await fsPromises.writeFile(join(root, 'a.txt'), 'old', 'utf8');
+    const { sha: oldSha } = await readFile(env, root, 'a.txt');
+    await fsPromises.writeFile(join(root, 'a.txt'), 'new', 'utf8');
+    await expect(isFresh(env, root, 'a.txt', oldSha)).resolves.toBe(false);
+  });
+
+  it('returns false when the file no longer exists', async () => {
+    await expect(isFresh(env, root, 'missing.txt', 'whatever')).resolves.toBe(false);
+  });
+
+  it('refuses paths that escape the root', async () => {
+    await expect(isFresh(env, root, '../escape.txt', 'sha')).rejects.toBeInstanceOf(SourceApiError);
   });
 });
 

@@ -167,6 +167,36 @@ export async function getRepoTree(env: SourceEnv, root: string, ref?: string): P
   return { entries, truncated };
 }
 
+/** Returns true when the cached `version` (sha256-prefix of content)
+ * still matches the file's current content. Missing file → false.
+ *
+ * v0 does the simple-correct thing: re-read + re-hash + compare. The
+ * cache layer's TTL gate (default 10s) keeps this from running on
+ * every `readFile`. A stat-based fast-path (mtime + size) could
+ * short-circuit when those match a recorded mtime+size — left as
+ * future optimisation once the cache stores stat metadata alongside
+ * content. For local disk reads the current implementation is fast
+ * enough that the optimisation isn't worth the contract
+ * complication. */
+export async function isFresh(
+  env: SourceEnv,
+  root: string,
+  path: string,
+  version: string,
+  ref?: string
+): Promise<boolean> {
+  void env;
+  void ref;
+  try {
+    const safe = ensureSafePath(root, path);
+    const content = await fsPromises.readFile(safe, 'utf8');
+    return shaOf(content) === version;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
 export async function writeFile(
   env: SourceEnv,
   root: string,
@@ -232,6 +262,7 @@ export const fs = {
   readFile,
   listFiles,
   getRepoTree,
+  isFresh,
   writeFile,
   ensureBranch,
   ensureFork,

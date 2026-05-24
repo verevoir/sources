@@ -4,6 +4,7 @@ import {
   getDefaultBranch,
   readFile,
   listFiles,
+  isFresh,
   ensureBranch,
   writeFile,
   ensureFork,
@@ -139,6 +140,48 @@ describe('readFile', () => {
       expect(err).toBeInstanceOf(SourceApiError);
       expect((err as SourceApiError).status).toBe(404);
     }
+  });
+});
+
+describe('isFresh', () => {
+  it('returns true when current blob sha matches the cached version', async () => {
+    scriptFetch([
+      {
+        status: 200,
+        body: {
+          type: 'file',
+          content: Buffer.from('payload', 'utf8').toString('base64'),
+          sha: 'cached-sha',
+        },
+      },
+    ]);
+    await expect(isFresh(env, 'foo/bar', 'README.md', 'cached-sha', 'main')).resolves.toBe(true);
+  });
+
+  it('returns false when the blob sha has moved', async () => {
+    scriptFetch([
+      {
+        status: 200,
+        body: {
+          type: 'file',
+          content: Buffer.from('payload', 'utf8').toString('base64'),
+          sha: 'newer-sha',
+        },
+      },
+    ]);
+    await expect(isFresh(env, 'foo/bar', 'README.md', 'older-sha', 'main')).resolves.toBe(false);
+  });
+
+  it('returns false when the path no longer resolves (404)', async () => {
+    scriptFetch([{ status: 404, text: 'not found' }]);
+    await expect(isFresh(env, 'foo/bar', 'gone.md', 'whatever', 'main')).resolves.toBe(false);
+  });
+
+  it('propagates non-404 errors', async () => {
+    scriptFetch([{ status: 500, text: 'boom' }]);
+    await expect(isFresh(env, 'foo/bar', 'README.md', 'sha', 'main')).rejects.toBeInstanceOf(
+      SourceApiError
+    );
   });
 });
 

@@ -190,6 +190,29 @@ export async function getRepoTree(
   return { entries, truncated: tree.truncated ?? false };
 }
 
+/** Returns true when the cached `version` (blob sha) is still the
+ * current blob sha for `(path, ref)`; false when GitHub has moved
+ * on (different sha) or the path no longer resolves (404). v0 does
+ * the cheap thing operationally — one Contents API GET, sha compare
+ * — wasting the base64 content download. Cheaper protocol variants
+ * (ETag `If-None-Match`, `Accept: application/vnd.github.object`,
+ * tree walks) can replace this when profiling shows it matters. */
+export async function isFresh(
+  env: SourceEnv,
+  repoUrl: string,
+  path: string,
+  version: string,
+  ref?: string
+): Promise<boolean> {
+  try {
+    const current = await readFile(env, repoUrl, path, ref);
+    return current.sha === version;
+  } catch (err) {
+    if (err instanceof SourceApiError && err.status === 404) return false;
+    throw err;
+  }
+}
+
 /** Ensure the named branch exists on the repo. No-op if already
  * present; otherwise creates the branch off the repo's default
  * branch's tip. */
@@ -298,6 +321,7 @@ export const github = {
   readFile,
   listFiles,
   getRepoTree,
+  isFresh,
   writeFile,
   ensureBranch,
   ensureFork,

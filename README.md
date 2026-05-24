@@ -112,12 +112,15 @@ Every subpath exposes the same set of functions (or a strict subset for read-onl
 readFile(env, repoUrl, path, ref?)         → Promise<{ content, sha }>
 listFiles(env, repoUrl, prefix, ref?)      → Promise<DirEntry[]>
 getRepoTree(env, repoUrl, ref?)            → Promise<RepoTree>
+isFresh(env, repoUrl, path, version, ref?) → Promise<boolean>
 writeFile(env, repoUrl, path, content, branch, message) → Promise<void>
 ensureBranch(env, repoUrl, branch)         → Promise<void>
 ensureFork(env, upstreamUrl)               → Promise<string>
 openPullRequest(env, target, head, base, title, body) → Promise<string>
 getDefaultBranch(env, repoUrl)             → Promise<string>
 ```
+
+`isFresh` answers "is the `version` I'm holding still the live one for `(repoUrl, path, ref)`?" — the cheap freshness check cache layers (`@verevoir/context`'s `wrapWithCache`) use to validate held entries without re-fetching content. Returns `false` when the source has moved (including when the path no longer resolves).
 
 The `SourceAdapter` interface in `@verevoir/sources` captures this exactly. An aggregate export (e.g. `github`) is also available per subpath so generic callers can pass an adapter around as a single value.
 
