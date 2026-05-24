@@ -19,8 +19,9 @@ Direct in-process consumption (the usage shown below) is for: writing your own M
 - `@verevoir/sources` — core types, the `SourceAdapter` contract, the `SourceApiError` class, and the `envFromProcessEnv` helper. No source dependency.
 - `@verevoir/sources/github` — GitHub REST + Git Data adapter. Uses native `fetch`, no SDK dependency.
 - `@verevoir/sources/fs` — local filesystem adapter. `repoUrl` is a local directory path. No auth, no API. Reads/lists/walks/writes; fork + PR throw 501 (not applicable to a local filesystem).
+- `@verevoir/sources/notion` — Notion adapter via `@notionhq/client` (optional peer dep). Models a Notion workspace as a documentation tree: pages are files, child pages are subdirectories, content is the page's blocks rendered to Markdown. Ships a minimal Markdown↔blocks converter for round-tripping aigency-generated content; rich Notion features (tables, callouts, etc.) read as best-effort placeholders.
 
-Future adapters land alongside (`@verevoir/sources/gitlab`, `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`, `@verevoir/sources/notion`) under the same contract.
+Future adapters land alongside (`@verevoir/sources/gitlab`, `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`) under the same contract.
 
 ## Install
 

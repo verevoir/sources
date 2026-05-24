@@ -19,8 +19,9 @@ Direct in-process use (below) is for: writing your own MCP server, embedding the
 - `@verevoir/sources` — core types and the `SourceAdapter` contract. No source dependency.
 - `@verevoir/sources/github` — GitHub REST + Git Data adapter. Native `fetch`, no SDK dependency.
 - `@verevoir/sources/fs` — local filesystem adapter. `repoUrl` is a directory path. No auth. `ensureFork` and `openPullRequest` throw 501 (not applicable).
+- `@verevoir/sources/notion` — Notion adapter via `@notionhq/client` (optional peer dep). `sourceUrl` is a Notion page URL or raw page ID; that page is the root, `path` traverses child pages by title or kebab-slug. Ships a minimal Markdown↔blocks converter. `ensureBranch` no-op, `ensureFork`/`openPullRequest` throw 501.
 
-Future: `@verevoir/sources/gitlab`, `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`, `@verevoir/sources/notion`.
+Future: `@verevoir/sources/gitlab`, `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`.
 
 ## Install
 
