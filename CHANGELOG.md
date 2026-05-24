@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 — 2026-05-24
+
+- **New: `@verevoir/sources/notion`** — third SourceAdapter implementation, over Notion's API via the official `@notionhq/client` SDK. Models a Notion workspace as a documentation tree: pages are "files", child pages are "subdirectories", file content is the page's blocks rendered to Markdown. `sourceUrl` is a Notion page URL or raw page ID; `path` is a slash-separated traversal through child pages by title (or its kebab-slug).
+- Ships a minimal Markdown ↔ Notion-blocks converter covering paragraphs, headings (1-3), bulleted and numbered list items, code blocks (with language alias normalisation), blockquote, divider. Targets aigency-generated content (ADRs, intent docs, tech-stack notes); content created in Notion with rich features (callouts, toggles, tables, etc.) reads with best-effort placeholders and may not round-trip losslessly through a write.
+- `isFresh` uses Notion's `last_edited_time` as the version handle — a single `pages.retrieve` call is the cheap probe.
+- `ensureBranch` no-op, `ensureFork` / `openPullRequest` throw 501 (no Notion equivalent), `getDefaultBranch` returns `'live'`.
+- `@notionhq/client` is an optional peer dependency — consumers who only use `/github` or `/fs` don't pull it.
+- 27 new tests (pure-function URL parser + Markdown converter + SDK-mocked adapter integration). 69 total.
+
 ## 0.3.1 — 2026-05-24
 
 - Docs: README + llms.txt gain a "Most consumers reach this via MCP" section pointing at `@verevoir/mcp` and the `alwaysLoad: true` Claude Code config. Clarifies that direct in-process use is for advanced cases (writing your own MCP server, composing adapters in libraries).
