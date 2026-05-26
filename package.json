@@ -1,6 +1,6 @@
 {
   "name": "@verevoir/sources",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Source-adapter primitive: a contract over remote + local file sources (read/list/tree/write/branch/fork/PR) with implementations as subpath imports. GitHub + local FS + Notion today; GitLab, Bitbucket, S3 follow.",
   "license": "Apache-2.0",
   "type": "module",
