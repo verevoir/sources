@@ -25,17 +25,13 @@
 // `version` (returned as `sha` from readFile, consumed by isFresh) is
 // the page's `last_edited_time` ISO timestamp. Cheap freshness probe.
 //
-// Markdown ↔ blocks: this file ships its own minimal converter
-// covering the block types we care about for project-record content:
-// paragraphs, headings (1-3), bulleted + numbered list items, code
-// blocks (with language), blockquote, divider. Other block types are
-// preserved on read in a best-effort way (rendered as a text dump
-// with a comment marker); writes that include unsupported block
-// shapes round-trip as paragraphs. Document content created by
-// humans in Notion with rich features may not round-trip losslessly
-// through a write — this adapter targets aigency-generated content
-// (ADRs, intent docs, tech-stack notes) where the supported subset
-// is sufficient.
+// Markdown body: read via the native `pages.retrieveMarkdown` and
+// write via `pages.updateMarkdown` (`replace_content`) — the SDK's
+// own block <-> Markdown conversion, rather than a hand-rolled one.
+// readFile renders the page to Markdown; writeFile replaces the body
+// from a Markdown string in a single call. Page-tree navigation
+// (listFiles / getRepoTree / resolvePath) still walks child blocks
+// directly via `blocks.children.list`.
 
 import { Client, isFullPage, isFullBlock } from '@notionhq/client';
 import type {
@@ -199,438 +195,6 @@ export function slugify(title: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Block ↔ Markdown — minimal converter for the subset we use
-// ---------------------------------------------------------------------------
-
-/** Fetch every block child of a page (transparent pagination). */
-async function fetchAllBlocks(c: Client, pageId: string): Promise<BlockObjectResponse[]> {
-  const all: BlockObjectResponse[] = [];
-  let cursor: string | undefined;
-  do {
-    const resp = await c.blocks.children.list({
-      block_id: pageId,
-      start_cursor: cursor,
-      page_size: 100,
-    });
-    for (const block of resp.results as Array<BlockObjectResponse | PartialBlockObjectResponse>) {
-      if (isFullBlock(block)) all.push(block);
-    }
-    cursor = resp.has_more ? (resp.next_cursor ?? undefined) : undefined;
-  } while (cursor);
-  return all;
-}
-
-/** Render an array of rich-text spans to a Markdown inline string.
- * Supports bold / italic / code / strikethrough / link annotations. */
-function richTextToMarkdown(
-  spans: Array<{
-    type: 'text';
-    text: { content: string; link: { url: string } | null };
-    annotations: {
-      bold: boolean;
-      italic: boolean;
-      strikethrough: boolean;
-      code: boolean;
-      underline: boolean;
-      color: string;
-    };
-    plain_text: string;
-    href: string | null;
-  }>
-): string {
-  return spans
-    .map((span) => {
-      let s = span.plain_text;
-      const ann = span.annotations;
-      if (ann.code) s = `\`${s}\``;
-      if (ann.bold) s = `**${s}**`;
-      if (ann.italic) s = `_${s}_`;
-      if (ann.strikethrough) s = `~~${s}~~`;
-      if (span.href) s = `[${s}](${span.href})`;
-      return s;
-    })
-    .join('');
-}
-
-/** Top-level block → Markdown line(s). Returns the rendered string
- * (no trailing newlines beyond what the block needs). Unsupported
- * block types fall back to a `<!-- notion:<type> -->` marker so the
- * reader sees that something was there. */
-function blockToMarkdown(block: BlockObjectResponse): string {
-  switch (block.type) {
-    case 'paragraph':
-      return richTextToMarkdown(block.paragraph.rich_text as never);
-    case 'heading_1':
-      return `# ${richTextToMarkdown(block.heading_1.rich_text as never)}`;
-    case 'heading_2':
-      return `## ${richTextToMarkdown(block.heading_2.rich_text as never)}`;
-    case 'heading_3':
-      return `### ${richTextToMarkdown(block.heading_3.rich_text as never)}`;
-    case 'bulleted_list_item':
-      return `- ${richTextToMarkdown(block.bulleted_list_item.rich_text as never)}`;
-    case 'numbered_list_item':
-      return `1. ${richTextToMarkdown(block.numbered_list_item.rich_text as never)}`;
-    case 'quote':
-      return `> ${richTextToMarkdown(block.quote.rich_text as never)}`;
-    case 'code': {
-      const lang = block.code.language;
-      const body = richTextToMarkdown(block.code.rich_text as never);
-      return ['```' + lang, body, '```'].join('\n');
-    }
-    case 'divider':
-      return '---';
-    case 'child_page':
-      // Child pages appear inline in the parent's block list. Render
-      // as a link-style reference so the reader knows the page is a
-      // child; readFile on the child returns its actual content.
-      return `<!-- notion:child_page id=${block.id} title="${block.child_page.title}" -->`;
-    case 'child_database':
-      return `<!-- notion:child_database id=${block.id} title="${block.child_database.title}" -->`;
-    default:
-      return `<!-- notion:${block.type} (unsupported on read) -->`;
-  }
-}
-
-function blocksToMarkdown(blocks: BlockObjectResponse[]): string {
-  if (blocks.length === 0) return '';
-  return blocks.map(blockToMarkdown).join('\n\n') + '\n';
-}
-
-// ---------------------------------------------------------------------------
-// Markdown → blocks — minimal converter for writeFile
-// ---------------------------------------------------------------------------
-
-type BlockCreate = Parameters<Client['blocks']['children']['append']>[0]['children'][number];
-
-/** Plain text → a single rich_text span. We don't parse inline
- * Markdown (no bold/italic/links) — the round-trip preserves
- * literal text so authors can edit in Notion. Full inline parsing
- * is a future addition if/when consumers need it. */
-function plainRichText(text: string): { type: 'text'; text: { content: string } }[] {
-  if (!text) return [];
-  return [{ type: 'text', text: { content: text } }];
-}
-
-/** Convert a Markdown string into an array of Notion block-create
- * objects suitable for `blocks.children.append`. Supports the same
- * block types as the read side: headings (1-3), paragraphs, bulleted
- * and numbered lists, code fences (with language), blockquote,
- * `---` divider. Unrecognised lines become paragraphs.
- *
- * Limitations (v0):
- *   - No inline formatting (bold/italic/link/inline-code parsing).
- *     Literal Markdown syntax round-trips as-is in the page.
- *   - No nested lists. Indented list items become top-level items.
- *   - No tables (Notion's table blocks have a different shape).
- *   - No images / files / embeds.
- *
- * The intent is round-tripping aigency-generated Markdown (ADRs,
- * intent docs, tech-stack notes); human-edited Notion content with
- * rich features should not be writeFile'd through this adapter. */
-export function markdownToBlocks(markdown: string): BlockCreate[] {
-  const lines = markdown.split('\n');
-  const blocks: BlockCreate[] = [];
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-
-    // Skip blank lines between blocks.
-    if (line.trim() === '') {
-      i++;
-      continue;
-    }
-
-    // Fenced code block.
-    const codeFence = line.match(/^```(.*)$/);
-    if (codeFence) {
-      const lang = codeFence[1].trim() || 'plain text';
-      const body: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i].startsWith('```')) {
-        body.push(lines[i]);
-        i++;
-      }
-      if (i < lines.length) i++; // consume closing fence
-      blocks.push({
-        type: 'code',
-        code: {
-          rich_text: plainRichText(body.join('\n')),
-          language: normaliseLanguage(lang),
-        },
-      });
-      continue;
-    }
-
-    // Headings.
-    const h1 = line.match(/^# (.*)$/);
-    if (h1) {
-      blocks.push({
-        type: 'heading_1',
-        heading_1: { rich_text: plainRichText(h1[1]) },
-      });
-      i++;
-      continue;
-    }
-    const h2 = line.match(/^## (.*)$/);
-    if (h2) {
-      blocks.push({
-        type: 'heading_2',
-        heading_2: { rich_text: plainRichText(h2[1]) },
-      });
-      i++;
-      continue;
-    }
-    const h3 = line.match(/^### (.*)$/);
-    if (h3) {
-      blocks.push({
-        type: 'heading_3',
-        heading_3: { rich_text: plainRichText(h3[1]) },
-      });
-      i++;
-      continue;
-    }
-
-    // Divider.
-    if (line.match(/^---+\s*$/)) {
-      blocks.push({ type: 'divider', divider: {} });
-      i++;
-      continue;
-    }
-
-    // Bulleted list item.
-    const bullet = line.match(/^\s*[-*+]\s+(.*)$/);
-    if (bullet) {
-      blocks.push({
-        type: 'bulleted_list_item',
-        bulleted_list_item: { rich_text: plainRichText(bullet[1]) },
-      });
-      i++;
-      continue;
-    }
-
-    // Numbered list item.
-    const numbered = line.match(/^\s*\d+\.\s+(.*)$/);
-    if (numbered) {
-      blocks.push({
-        type: 'numbered_list_item',
-        numbered_list_item: { rich_text: plainRichText(numbered[1]) },
-      });
-      i++;
-      continue;
-    }
-
-    // Blockquote (run of lines starting with > collapse into one
-    // quote block).
-    if (line.startsWith('> ')) {
-      const quoteLines: string[] = [];
-      while (i < lines.length && lines[i].startsWith('> ')) {
-        quoteLines.push(lines[i].slice(2));
-        i++;
-      }
-      blocks.push({
-        type: 'quote',
-        quote: { rich_text: plainRichText(quoteLines.join('\n')) },
-      });
-      continue;
-    }
-
-    // Default: paragraph. A paragraph is a run of consecutive
-    // non-blank lines that don't match any other block start.
-    const paraLines: string[] = [];
-    while (
-      i < lines.length &&
-      lines[i].trim() !== '' &&
-      !lines[i].match(/^#+ /) &&
-      !lines[i].match(/^```/) &&
-      !lines[i].match(/^---+\s*$/) &&
-      !lines[i].match(/^\s*[-*+]\s+/) &&
-      !lines[i].match(/^\s*\d+\.\s+/) &&
-      !lines[i].startsWith('> ')
-    ) {
-      paraLines.push(lines[i]);
-      i++;
-    }
-    if (paraLines.length > 0) {
-      blocks.push({
-        type: 'paragraph',
-        paragraph: { rich_text: plainRichText(paraLines.join('\n')) },
-      });
-    }
-  }
-  return blocks;
-}
-
-// Notion's code block requires a specific language enum. Map common
-// aliases; fall back to 'plain text' for unknowns.
-function normaliseLanguage(input: string): NotionCodeLanguage {
-  const supported = new Set<NotionCodeLanguage>([
-    'abap',
-    'arduino',
-    'bash',
-    'basic',
-    'c',
-    'clojure',
-    'coffeescript',
-    'c++',
-    'c#',
-    'css',
-    'dart',
-    'diff',
-    'docker',
-    'elixir',
-    'elm',
-    'erlang',
-    'flow',
-    'fortran',
-    'f#',
-    'gherkin',
-    'glsl',
-    'go',
-    'graphql',
-    'groovy',
-    'haskell',
-    'html',
-    'java',
-    'javascript',
-    'json',
-    'julia',
-    'kotlin',
-    'latex',
-    'less',
-    'lisp',
-    'livescript',
-    'lua',
-    'makefile',
-    'markdown',
-    'markup',
-    'matlab',
-    'mermaid',
-    'nix',
-    'objective-c',
-    'ocaml',
-    'pascal',
-    'perl',
-    'php',
-    'plain text',
-    'powershell',
-    'prolog',
-    'protobuf',
-    'python',
-    'r',
-    'reason',
-    'ruby',
-    'rust',
-    'sass',
-    'scala',
-    'scheme',
-    'scss',
-    'shell',
-    'sql',
-    'swift',
-    'typescript',
-    'vb.net',
-    'verilog',
-    'vhdl',
-    'visual basic',
-    'webassembly',
-    'xml',
-    'yaml',
-  ]);
-  const lower = input.toLowerCase().trim();
-  const aliases: Record<string, NotionCodeLanguage> = {
-    js: 'javascript',
-    ts: 'typescript',
-    py: 'python',
-    rb: 'ruby',
-    sh: 'shell',
-    yml: 'yaml',
-    md: 'markdown',
-    'c++': 'c++',
-    cpp: 'c++',
-    cs: 'c#',
-    fs: 'f#',
-    text: 'plain text',
-    '': 'plain text',
-  };
-  if (aliases[lower]) return aliases[lower];
-  if (supported.has(lower as NotionCodeLanguage)) return lower as NotionCodeLanguage;
-  return 'plain text';
-}
-
-type NotionCodeLanguage =
-  | 'abap'
-  | 'arduino'
-  | 'bash'
-  | 'basic'
-  | 'c'
-  | 'clojure'
-  | 'coffeescript'
-  | 'c++'
-  | 'c#'
-  | 'css'
-  | 'dart'
-  | 'diff'
-  | 'docker'
-  | 'elixir'
-  | 'elm'
-  | 'erlang'
-  | 'flow'
-  | 'fortran'
-  | 'f#'
-  | 'gherkin'
-  | 'glsl'
-  | 'go'
-  | 'graphql'
-  | 'groovy'
-  | 'haskell'
-  | 'html'
-  | 'java'
-  | 'javascript'
-  | 'json'
-  | 'julia'
-  | 'kotlin'
-  | 'latex'
-  | 'less'
-  | 'lisp'
-  | 'livescript'
-  | 'lua'
-  | 'makefile'
-  | 'markdown'
-  | 'markup'
-  | 'matlab'
-  | 'mermaid'
-  | 'nix'
-  | 'objective-c'
-  | 'ocaml'
-  | 'pascal'
-  | 'perl'
-  | 'php'
-  | 'plain text'
-  | 'powershell'
-  | 'prolog'
-  | 'protobuf'
-  | 'python'
-  | 'r'
-  | 'reason'
-  | 'ruby'
-  | 'rust'
-  | 'sass'
-  | 'scala'
-  | 'scheme'
-  | 'scss'
-  | 'shell'
-  | 'sql'
-  | 'swift'
-  | 'typescript'
-  | 'vb.net'
-  | 'verilog'
-  | 'vhdl'
-  | 'visual basic'
-  | 'webassembly'
-  | 'xml'
-  | 'yaml';
-
-// ---------------------------------------------------------------------------
 // SourceAdapter methods
 // ---------------------------------------------------------------------------
 
@@ -650,11 +214,19 @@ export async function readFile(
   const pageId = await resolvePath(c, rootId, path);
   try {
     const page = await c.pages.retrieve({ page_id: pageId });
-    const blocks = await fetchAllBlocks(c, pageId);
-    const content = blocksToMarkdown(blocks);
     const lastEditedTime = isFullPage(page as PageObjectResponse)
       ? (page as PageObjectResponse).last_edited_time
       : '';
+    let content = '';
+    try {
+      content = (await c.pages.retrieveMarkdown({ page_id: pageId })).markdown ?? '';
+    } catch (bodyErr) {
+      // A page with no body content can 404 the body endpoint; the
+      // page itself exists (pages.retrieve succeeded), so treat that
+      // as an empty body rather than failing the read.
+      const e = bodyErr as { code?: string; status?: number };
+      if (e?.code !== 'object_not_found' && e?.status !== 404) throw bodyErr;
+    }
     return { content, sha: lastEditedTime };
   } catch (err) {
     throw mapError(err, `readFile(${pageId})`);
@@ -759,11 +331,10 @@ export async function isFresh(
   }
 }
 
-/** Replace the page's children (block tree) with a fresh tree
- * converted from the Markdown body. Atomic-ish at v0: delete all
- * existing children, then append the new ones. Notion has no
- * transactional API surface here; a failure between delete and
- * append leaves the page empty until the next successful write.
+/** Replace the page body with the Markdown via the native
+ * `pages.updateMarkdown` (`replace_content`) — one call, no
+ * hand-rolled block conversion. `allow_deleting_content` lets an
+ * empty body clear the page.
  *
  * `branch` and `commitMessage` are ignored — Notion has no branch /
  * commit primitives. */
@@ -781,22 +352,11 @@ export async function writeFile(
   const rootId = await rootPageId(rootUrl);
   const pageId = await resolvePath(c, rootId, path);
   try {
-    // Delete existing children (one API call per block; pagination
-    // for read so we know what to delete).
-    const existing = await fetchAllBlocks(c, pageId);
-    for (const block of existing) {
-      await c.blocks.delete({ block_id: block.id });
-    }
-    // Append the new block tree. Notion caps appends at 100 blocks
-    // per call; chunk if needed.
-    const newBlocks = markdownToBlocks(content);
-    const chunkSize = 100;
-    for (let i = 0; i < newBlocks.length; i += chunkSize) {
-      await c.blocks.children.append({
-        block_id: pageId,
-        children: newBlocks.slice(i, i + chunkSize),
-      });
-    }
+    await c.pages.updateMarkdown({
+      page_id: pageId,
+      type: 'replace_content',
+      replace_content: { new_str: content, allow_deleting_content: true },
+    });
   } catch (err) {
     throw mapError(err, `writeFile(${pageId})`);
   }

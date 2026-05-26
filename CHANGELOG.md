@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.0 — 2026-05-26
+
+- **Notion adapter uses the SDK's native Markdown conversion.** `readFile` now reads page bodies via `pages.retrieveMarkdown` and `writeFile` writes via `pages.updateMarkdown` (`replace_content` with `allow_deleting_content`), dropping the ~430-line hand-rolled block↔Markdown converter (`fetchAllBlocks` / `blocksToMarkdown` / `markdownToBlocks` / language-alias map). Same read/write contract, far less surface to maintain, and no more block-shape drift (the class of bug behind the earlier `updateMarkdown` fix). `readFile` treats a 404 on the body endpoint as an empty body (the page itself still resolves). Page-tree navigation (`listFiles` / `getRepoTree` / `resolvePath`) still walks child blocks directly. **Removed:** the internal `markdownToBlocks` export (test-only; no external consumers). (STDIO-42.)
+
 ## 0.4.0 — 2026-05-24
 
 - **New: `@verevoir/sources/notion`** — third SourceAdapter implementation, over Notion's API via the official `@notionhq/client` SDK. Models a Notion workspace as a documentation tree: pages are "files", child pages are "subdirectories", file content is the page's blocks rendered to Markdown. `sourceUrl` is a Notion page URL or raw page ID; `path` is a slash-separated traversal through child pages by title (or its kebab-slug).

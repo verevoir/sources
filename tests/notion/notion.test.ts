@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { parseNotionPageUrl, slugify, markdownToBlocks } from '../../src/notion/index.js';
+import { parseNotionPageUrl, slugify } from '../../src/notion/index.js';
 import { SourceApiError, type SourceEnv } from '../../src/index.js';
 
 // ---------------------------------------------------------------------------
@@ -65,86 +65,6 @@ describe('slugify', () => {
   });
 });
 
-describe('markdownToBlocks — minimal converter', () => {
-  it('renders an empty string as no blocks', () => {
-    expect(markdownToBlocks('')).toEqual([]);
-  });
-
-  it('renders headings 1-3', () => {
-    const blocks = markdownToBlocks('# H1\n\n## H2\n\n### H3');
-    expect(blocks).toHaveLength(3);
-    expect(blocks[0].type).toBe('heading_1');
-    expect(blocks[1].type).toBe('heading_2');
-    expect(blocks[2].type).toBe('heading_3');
-  });
-
-  it('groups consecutive non-block lines into a single paragraph', () => {
-    const blocks = markdownToBlocks('Line one\nLine two\nLine three');
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0].type).toBe('paragraph');
-    const richText = (
-      blocks[0] as { paragraph: { rich_text: Array<{ text: { content: string } }> } }
-    ).paragraph.rich_text;
-    expect(richText[0].text.content).toBe('Line one\nLine two\nLine three');
-  });
-
-  it('parses fenced code blocks with a language', () => {
-    const md = '```ts\nconst x = 1;\n```';
-    const blocks = markdownToBlocks(md);
-    expect(blocks).toHaveLength(1);
-    const code = blocks[0] as {
-      type: 'code';
-      code: { language: string; rich_text: Array<{ text: { content: string } }> };
-    };
-    expect(code.type).toBe('code');
-    expect(code.code.language).toBe('typescript'); // alias resolved
-    expect(code.code.rich_text[0].text.content).toBe('const x = 1;');
-  });
-
-  it('parses bulleted and numbered lists as separate list-item blocks', () => {
-    const blocks = markdownToBlocks('- One\n- Two\n\n1. First\n2. Second');
-    expect(blocks).toHaveLength(4);
-    expect(blocks[0].type).toBe('bulleted_list_item');
-    expect(blocks[1].type).toBe('bulleted_list_item');
-    expect(blocks[2].type).toBe('numbered_list_item');
-    expect(blocks[3].type).toBe('numbered_list_item');
-  });
-
-  it('parses `---` as a divider', () => {
-    const blocks = markdownToBlocks('Above\n\n---\n\nBelow');
-    expect(blocks).toHaveLength(3);
-    expect(blocks[0].type).toBe('paragraph');
-    expect(blocks[1].type).toBe('divider');
-    expect(blocks[2].type).toBe('paragraph');
-  });
-
-  it('collapses consecutive blockquote lines into one quote block', () => {
-    const blocks = markdownToBlocks('> first quoted line\n> second quoted line');
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0].type).toBe('quote');
-    const quote = blocks[0] as { quote: { rich_text: Array<{ text: { content: string } }> } };
-    expect(quote.quote.rich_text[0].text.content).toBe('first quoted line\nsecond quoted line');
-  });
-
-  it('normalises common code-block language aliases', () => {
-    const cases: Array<[string, string]> = [
-      ['js', 'javascript'],
-      ['ts', 'typescript'],
-      ['py', 'python'],
-      ['rb', 'ruby'],
-      ['sh', 'shell'],
-      ['yml', 'yaml'],
-      ['', 'plain text'],
-      ['nonsense-language', 'plain text'],
-    ];
-    for (const [input, expected] of cases) {
-      const blocks = markdownToBlocks('```' + input + '\nbody\n```');
-      const code = blocks[0] as { code: { language: string } };
-      expect(code.code.language).toBe(expected);
-    }
-  });
-});
-
 // ---------------------------------------------------------------------------
 // SDK-mocked tests — readFile / isFresh / writeFile
 // ---------------------------------------------------------------------------
@@ -170,12 +90,12 @@ interface ClientStub {
   blocks: {
     children: {
       list: ReturnType<typeof vi.fn>;
-      append: ReturnType<typeof vi.fn>;
     };
-    delete: ReturnType<typeof vi.fn>;
   };
   pages: {
     retrieve: ReturnType<typeof vi.fn>;
+    retrieveMarkdown: ReturnType<typeof vi.fn>;
+    updateMarkdown: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -184,10 +104,9 @@ let clientStub: ClientStub;
 beforeEach(() => {
   clientStub = {
     blocks: {
-      children: { list: vi.fn(), append: vi.fn() },
-      delete: vi.fn(),
+      children: { list: vi.fn() },
     },
-    pages: { retrieve: vi.fn() },
+    pages: { retrieve: vi.fn(), retrieveMarkdown: vi.fn(), updateMarkdown: vi.fn() },
   };
 });
 
@@ -218,53 +137,12 @@ function fullPage(id: string, lastEditedTime: string): unknown {
   };
 }
 
-function paragraphBlock(
-  id: string,
-  text: string,
-  lastEditedTime = '2026-05-24T10:00:00.000Z'
-): unknown {
-  return {
-    object: 'block',
-    id,
-    parent: { type: 'page_id', page_id: ROOT_ID },
-    type: 'paragraph',
-    paragraph: {
-      rich_text: [
-        {
-          type: 'text',
-          text: { content: text, link: null },
-          annotations: {
-            bold: false,
-            italic: false,
-            strikethrough: false,
-            underline: false,
-            code: false,
-            color: 'default',
-          },
-          plain_text: text,
-          href: null,
-        },
-      ],
-      color: 'default',
-    },
-    has_children: false,
-    archived: false,
-    created_time: lastEditedTime,
-    last_edited_time: lastEditedTime,
-    created_by: { object: 'user', id: 'u1' },
-    last_edited_by: { object: 'user', id: 'u1' },
-    in_trash: false,
-  };
-}
-
 describe('readFile', () => {
-  it('returns blocks rendered to Markdown + last_edited_time as sha', async () => {
+  it('returns the page body via retrieveMarkdown + last_edited_time as sha', async () => {
     // Resolve path '': just return the root page. No child lookup needed.
     clientStub.pages.retrieve.mockResolvedValue(fullPage(ROOT_ID, '2026-05-24T12:00:00.000Z'));
-    clientStub.blocks.children.list.mockResolvedValue({
-      results: [paragraphBlock('b1', 'Hello world'), paragraphBlock('b2', 'Second paragraph')],
-      has_more: false,
-      next_cursor: null,
+    clientStub.pages.retrieveMarkdown.mockResolvedValue({
+      markdown: 'Hello world\n\nSecond paragraph\n',
     });
 
     const { readFile } = await import('../../src/notion/index.js');
@@ -272,6 +150,17 @@ describe('readFile', () => {
 
     expect(result.sha).toBe('2026-05-24T12:00:00.000Z');
     expect(result.content).toBe('Hello world\n\nSecond paragraph\n');
+  });
+
+  it('treats a 404 on the body endpoint as an empty body (page still exists)', async () => {
+    clientStub.pages.retrieve.mockResolvedValue(fullPage(ROOT_ID, '2026-05-24T12:00:00.000Z'));
+    clientStub.pages.retrieveMarkdown.mockRejectedValue({ code: 'object_not_found', status: 404 });
+
+    const { readFile } = await import('../../src/notion/index.js');
+    const result = await readFile(ENV, ROOT_URL, '');
+
+    expect(result.content).toBe('');
+    expect(result.sha).toBe('2026-05-24T12:00:00.000Z');
   });
 
   it('throws SourceApiError(404) when the path does not resolve', async () => {
@@ -315,27 +204,23 @@ describe('isFresh', () => {
 });
 
 describe('writeFile', () => {
-  it('deletes existing children then appends the Markdown-converted blocks', async () => {
-    clientStub.blocks.children.list.mockResolvedValue({
-      results: [paragraphBlock('old-1', 'old content')],
-      has_more: false,
-      next_cursor: null,
-    });
-    clientStub.blocks.delete.mockResolvedValue({});
-    clientStub.blocks.children.append.mockResolvedValue({ results: [] });
+  it('replaces the page body via updateMarkdown (replace_content)', async () => {
+    clientStub.pages.updateMarkdown.mockResolvedValue({});
 
     const { writeFile } = await import('../../src/notion/index.js');
     await writeFile(ENV, ROOT_URL, '', '# Replaced\n\nNew body.', 'ignored', 'ignored');
 
-    expect(clientStub.blocks.delete).toHaveBeenCalledWith({ block_id: 'old-1' });
-    expect(clientStub.blocks.children.append).toHaveBeenCalledTimes(1);
-    const appendCall = clientStub.blocks.children.append.mock.calls[0]?.[0] as {
-      block_id: string;
-      children: Array<{ type: string }>;
+    expect(clientStub.pages.updateMarkdown).toHaveBeenCalledTimes(1);
+    const call = clientStub.pages.updateMarkdown.mock.calls[0]?.[0] as {
+      page_id: string;
+      type: string;
+      replace_content: { new_str: string; allow_deleting_content: boolean };
     };
-    expect(appendCall.children).toHaveLength(2);
-    expect(appendCall.children[0].type).toBe('heading_1');
-    expect(appendCall.children[1].type).toBe('paragraph');
+    expect(call.type).toBe('replace_content');
+    expect(call.replace_content).toEqual({
+      new_str: '# Replaced\n\nNew body.',
+      allow_deleting_content: true,
+    });
   });
 });
 
