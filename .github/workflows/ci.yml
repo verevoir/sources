@@ -10,12 +10,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # fetch-depth: 0 is required so the version-bump check below can diff
+          # the PR head against the base branch (shallow clones have no base).
+          fetch-depth: 0
       - uses: actions/setup-node@v6
         with:
           node-version: 20
           cache: npm
       - run: npm ci
+
+      # Gate 1 — dependency vulnerability scan.
+      # Fails the build if any moderate-or-higher advisory is found in the
+      # dependency tree.  Do not lower the level; resolve the advisory instead.
+      - run: npm audit --audit-level=moderate
+
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+      # Gate 2 — version-bump-required check (PR builds only).
+      # A change to any file under src/ must be accompanied by a version bump
+      # in package.json.  CI/docs-only PRs (no src/ diff) are exempt, so a PR
+      # that only touches .github/ or docs will pass without bumping the version.
+      - name: Require a version bump when published source changes
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --quiet origin "$BASE"
+          changed=$(git diff --name-only "origin/$BASE...HEAD" -- 'src/**' || true)
+          if [ -z "$changed" ]; then echo "No src/ changes — version bump not required."; exit 0; fi
+          base_ver=$(git show "origin/$BASE:package.json" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")
+          head_ver=$(node -p "require('./package.json').version")
+          if [ "$base_ver" = "$head_ver" ]; then
+            echo "::error::src/ changed but package.json version is still $head_ver — bump it (publish-on-change)."; exit 1; fi
+          echo "Version bumped $base_ver -> $head_ver."
+        env:
+          BASE: ${{ github.base_ref }}
