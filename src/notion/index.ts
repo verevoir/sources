@@ -194,6 +194,38 @@ export function slugify(title: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
+/** Like resolvePath, but UPSERTS: a segment that doesn't resolve is created
+ * as a child page titled by the segment, and traversal continues — so a write
+ * to a not-yet-existing path creates the page (and any missing parents) rather
+ * than 404ing. Idempotent: an existing page matches by title or slug, so a
+ * repeat write updates in place. The segment text becomes the page title. */
+async function resolveOrCreatePath(c: Client, rootId: string, path: string): Promise<string> {
+  const normalised = path.trim();
+  if (normalised === '' || normalised === '.' || normalised === '/') return rootId;
+  const segments = normalised.replace(/^\/+|\/+$/g, '').split('/');
+  let currentId = rootId;
+  for (const seg of segments) {
+    const children = await listChildren(c, currentId);
+    const match = children.find(
+      (child) => child.title === seg || slugify(child.title) === slugify(seg)
+    );
+    if (match) {
+      currentId = match.id;
+      continue;
+    }
+    try {
+      const created = await c.pages.create({
+        parent: { type: 'page_id', page_id: currentId },
+        properties: { title: { title: [{ text: { content: seg } }] } },
+      });
+      currentId = created.id;
+    } catch (err) {
+      throw mapError(err, `createPage("${seg}" under ${currentId})`);
+    }
+  }
+  return currentId;
+}
+
 // ---------------------------------------------------------------------------
 // SourceAdapter methods
 // ---------------------------------------------------------------------------
@@ -350,7 +382,9 @@ export async function writeFile(
   void commitMessage;
   const c = client(env);
   const rootId = await rootPageId(rootUrl);
-  const pageId = await resolvePath(c, rootId, path);
+  // Upsert: create the page (and any missing parents) if the path doesn't
+  // resolve yet, rather than 404ing — so writeFile can create new pages.
+  const pageId = await resolveOrCreatePath(c, rootId, path);
   try {
     await c.pages.updateMarkdown({
       page_id: pageId,
