@@ -96,6 +96,7 @@ interface ClientStub {
     retrieve: ReturnType<typeof vi.fn>;
     retrieveMarkdown: ReturnType<typeof vi.fn>;
     updateMarkdown: ReturnType<typeof vi.fn>;
+    create: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -106,7 +107,12 @@ beforeEach(() => {
     blocks: {
       children: { list: vi.fn() },
     },
-    pages: { retrieve: vi.fn(), retrieveMarkdown: vi.fn(), updateMarkdown: vi.fn() },
+    pages: {
+      retrieve: vi.fn(),
+      retrieveMarkdown: vi.fn(),
+      updateMarkdown: vi.fn(),
+      create: vi.fn(),
+    },
   };
 });
 
@@ -221,6 +227,59 @@ describe('writeFile', () => {
       new_str: '# Replaced\n\nNew body.',
       allow_deleting_content: true,
     });
+  });
+
+  it('upserts: creates the page when the path does not exist, then writes it', async () => {
+    // No children under root → the segment doesn't resolve → it's created.
+    clientStub.blocks.children.list.mockResolvedValue({
+      results: [],
+      has_more: false,
+      next_cursor: null,
+    });
+    clientStub.pages.create.mockResolvedValue({ id: 'new-page-id' });
+    clientStub.pages.updateMarkdown.mockResolvedValue({});
+
+    const { writeFile } = await import('../../src/notion/index.js');
+    await writeFile(ENV, ROOT_URL, 'The Capability Model', '# Model', 'x', 'x');
+
+    // created a child page titled by the segment…
+    expect(clientStub.pages.create).toHaveBeenCalledTimes(1);
+    const createArg = clientStub.pages.create.mock.calls[0]?.[0] as {
+      parent: { page_id: string };
+    };
+    expect(createArg.parent.page_id).toBe(ROOT_ID);
+    // …then wrote the body to the new page, not the root.
+    const writeArg = clientStub.pages.updateMarkdown.mock.calls[0]?.[0] as {
+      page_id: string;
+    };
+    expect(writeArg.page_id).toBe('new-page-id');
+  });
+
+  it('updates in place when the path already exists (idempotent, no create)', async () => {
+    clientStub.blocks.children.list.mockResolvedValue({
+      results: [
+        {
+          object: 'block',
+          id: 'existing-id',
+          type: 'child_page',
+          child_page: { title: 'The Capability Model' },
+          last_edited_time: '2026-06-06T00:00:00.000Z',
+          has_children: true,
+        },
+      ],
+      has_more: false,
+      next_cursor: null,
+    });
+    clientStub.pages.updateMarkdown.mockResolvedValue({});
+
+    const { writeFile } = await import('../../src/notion/index.js');
+    await writeFile(ENV, ROOT_URL, 'the-capability-model', '# Model v2', 'x', 'x');
+
+    expect(clientStub.pages.create).not.toHaveBeenCalled();
+    const writeArg = clientStub.pages.updateMarkdown.mock.calls[0]?.[0] as {
+      page_id: string;
+    };
+    expect(writeArg.page_id).toBe('existing-id');
   });
 });
 
