@@ -87,6 +87,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
+          # The App token is interpolated into the API call + clone URL below and is safe
+          # in logs: create-github-app-token registers it via core.setSecret, so GitHub
+          # masks it everywhere it appears — even on a clone error — it is never printed.
           code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/repos/verevoir/capabilities)
           echo "capabilities API access with this token -> HTTP $code"
           D="/home/runner/.antagonistic-review-mcp"
