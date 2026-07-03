@@ -6,8 +6,7 @@
 # not rename it without updating the protection.
 #
 # The reviewer's `provision` comes from @verevoir/capabilities, git-installed from
-# its PRIVATE repo (see mcp.json). ONE token — the CUTOVER_PUSH_TOKEN secret (org,
-# with repo-secret copies in web/guardrails/capabilities) — does both jobs: it
+# its PRIVATE repo (see mcp.json). ONE token — the CUTOVER_PUSH_TOKEN secret (an org secret) — does both jobs: it
 # clones that private repo AND reads the corpus over the GitHub adapter. The
 # built-in Actions token is repo-scoped and cannot clone cross-repo, hence the PAT.
 #
@@ -24,7 +23,7 @@ on:
   workflow_dispatch: {}
 
 concurrency:
-  group: antagonistic-review-${{ github.event.pull_request.number }}
+  group: antagonistic-review-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 permissions:
@@ -39,6 +38,8 @@ jobs:
       # One token does both: clone the private @verevoir/capabilities MCP and read
       # the corpus via the GitHub adapter. The built-in token can't clone cross-repo.
       GITHUB_TOKEN: ${{ secrets.CUTOVER_PUSH_TOKEN }}
+      # NB this shadows the Actions-injected GITHUB_TOKEN at job scope; the preflight
+      # below relies on that (an unset secret makes it empty, and the job blocks).
     steps:
       - name: Fail loud if the reviewer cannot run (no rubric = no review)
         env:
@@ -63,7 +64,7 @@ jobs:
           fi
 
       - name: Check out the change
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0 # full history so the reviewer can diff base..head
 
@@ -90,7 +91,7 @@ jobs:
 
       - name: Adversarial review against the provisioned practices
         id: review
-        uses: anthropics/claude-code-base-action@beta
+        uses: anthropics/claude-code-base-action@e8132bc5e637a42c27763fc757faa37e1ee43b34 # @beta
         with:
           # Pass both; the Claude Code CLI uses the OAuth token over the API key
           # when both are present, and the API key when only it is set. The
