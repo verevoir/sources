@@ -76,6 +76,7 @@ jobs:
           # Explicit current Sonnet id. The action's `sonnet` alias resolves to a
           # stale snapshot some credentials 404 on; pin the id your credential serves.
           model: claude-sonnet-4-6
+          allowed_tools: "Bash,Read,Write,Edit,Glob,Grep,mcp__verevoir__provision"
           # The verevoir MCP (@verevoir/capabilities) gives the reviewer `provision`
           # to DERIVE the rubric from the canonical corpus. If mcp.json is absent the
           # action errors and the gate fails closed — the correct outcome.
