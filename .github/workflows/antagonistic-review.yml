@@ -6,9 +6,10 @@
 # not rename it without updating the protection.
 #
 # The reviewer's `provision` comes from @verevoir/capabilities, git-installed from
-# its PRIVATE repo (see mcp.json). ONE token — the CUTOVER_PUSH_TOKEN secret (an org secret) — does both jobs: it
-# clones that private repo AND reads the corpus over the GitHub adapter. The
-# built-in Actions token is repo-scoped and cannot clone cross-repo, hence the PAT.
+# its PRIVATE repo (see mcp.json). Credentials: a GitHub App (VEREVOIR_APP_ID /
+# VEREVOIR_APP_PRIVATE_KEY) mints a per-run, least-privilege installation token
+# (Contents:read, scoped to capabilities + aigency-guardrails) — NO standing PAT
+# (no-standing-auth-bypass). It both clones that private repo and reads the corpus.
 #
 # Why this can't be talked or rewritten past:
 #   - pull_request runs the workflow from the BASE branch, not the PR head.
@@ -34,24 +35,31 @@ jobs:
   antagonistic-review:
     name: antagonistic-review
     runs-on: ubuntu-latest
-    env:
-      # One token does both: clone the private @verevoir/capabilities MCP and read
-      # the corpus via the GitHub adapter. The built-in token can't clone cross-repo.
-      GITHUB_TOKEN: ${{ secrets.CUTOVER_PUSH_TOKEN }}
-      # NB this shadows the Actions-injected GITHUB_TOKEN at job scope; the preflight
-      # below relies on that (an unset secret makes it empty, and the job blocks).
     steps:
+      # Ephemeral, least-privilege credential: a per-run GitHub App installation
+      # token (Contents:read, scoped to just the repos the gate reads) — no standing
+      # PAT. The step fails the job if the App creds are absent, so a missing
+      # credential is fail-closed by construction.
+      - name: Mint an ephemeral GitHub App token (reviewer-MCP clone + corpus read)
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.VEREVOIR_APP_ID }}
+          private-key: ${{ secrets.VEREVOIR_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: capabilities,aigency-guardrails
+
       - name: Fail loud if the reviewer cannot run (no rubric = no review)
         env:
+          GATE_TOKEN: ${{ steps.app-token.outputs.token }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          # Structural fail-closed: without the clone token the reviewer MCP can't be
-          # built, so `provision` is absent and there is no rubric. Block here rather
-          # than rely on the reviewer choosing to auto-REJECT (keystone: the gate must
-          # fail CLOSED by construction, on EVERY credential path).
-          if [ -z "$GITHUB_TOKEN" ]; then
-            echo "::error title=Antagonistic review cannot run::CUTOVER_PUSH_TOKEN (the reviewer-MCP clone token) is not set for this repo or org."
+          # Structural fail-closed: no App token -> the reviewer MCP can't be cloned or
+          # built -> no `provision`, no rubric. (The mint step already fails the job
+          # when the App creds are absent; this is belt-and-braces.)
+          if [ -z "$GATE_TOKEN" ]; then
+            echo "::error title=Antagonistic review cannot run::The GitHub App token could not be minted (check VEREVOIR_APP_ID / VEREVOIR_APP_PRIVATE_KEY and the App installation)."
             echo "Without it the reviewer MCP cannot be built and there is no rubric, so this change is BLOCKED."
             exit 1
           fi
@@ -76,6 +84,8 @@ jobs:
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
 
       - name: Pre-build the reviewer MCP (@verevoir/capabilities)
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/repos/verevoir/capabilities)
           echo "capabilities API access with this token -> HTTP $code"
@@ -92,6 +102,9 @@ jobs:
       - name: Adversarial review against the provisioned practices
         id: review
         uses: anthropics/claude-code-base-action@e8132bc5e637a42c27763fc757faa37e1ee43b34 # @beta
+        env:
+          # the MCP (mcp.json) reads the corpus with this ephemeral, scoped token.
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         with:
           # Pass both; the Claude Code CLI uses the OAuth token over the API key
           # when both are present, and the API key when only it is set. The
