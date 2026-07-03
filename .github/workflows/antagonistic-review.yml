@@ -40,11 +40,20 @@ jobs:
       # the corpus via the GitHub adapter. The built-in token can't clone cross-repo.
       GITHUB_TOKEN: ${{ secrets.CUTOVER_PUSH_TOKEN }}
     steps:
-      - name: Fail loud if the reviewer has no model credential
+      - name: Fail loud if the reviewer cannot run (no rubric = no review)
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
+          # Structural fail-closed: without the clone token the reviewer MCP can't be
+          # built, so `provision` is absent and there is no rubric. Block here rather
+          # than rely on the reviewer choosing to auto-REJECT (keystone: the gate must
+          # fail CLOSED by construction, on EVERY credential path).
+          if [ -z "$GITHUB_TOKEN" ]; then
+            echo "::error title=Antagonistic review cannot run::CUTOVER_PUSH_TOKEN (the reviewer-MCP clone token) is not set for this repo or org."
+            echo "Without it the reviewer MCP cannot be built and there is no rubric, so this change is BLOCKED."
+            exit 1
+          fi
           # Either credential lets the reviewer run; CLAUDE_CODE_OAUTH_TOKEN is
           # preferred (the Claude Code CLI uses it over the API key when both are set).
           if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
@@ -61,13 +70,11 @@ jobs:
       # `npx github:verevoir/capabilities` (spawned per mcp.json) has to CLONE that
       # private repo. Route git over HTTPS with the same token.
       - name: Rewrite ssh github URLs to https (for the public accelerator dep)
-        if: ${{ env.GITHUB_TOKEN != '' }}
         run: |
           git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
 
       - name: Pre-build the reviewer MCP (@verevoir/capabilities)
-        if: ${{ env.GITHUB_TOKEN != '' }}
         run: |
           code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/repos/verevoir/capabilities)
           echo "capabilities API access with this token -> HTTP $code"
