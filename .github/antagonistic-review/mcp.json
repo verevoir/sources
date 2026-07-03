@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "verevoir": {
-      "command": "npx",
-      "args": ["-y", "github:verevoir/capabilities#v0.1.0"],
+      "command": "node",
+      "args": ["/home/runner/.antagonistic-review-mcp/dist/bin.js"],
       "env": {
         "GITHUB_TOKEN": "${GITHUB_TOKEN}"
       }

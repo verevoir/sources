@@ -60,9 +60,24 @@ jobs:
 
       # `npx github:verevoir/capabilities` (spawned per mcp.json) has to CLONE that
       # private repo. Route git over HTTPS with the same token.
-      - name: Allow npx to clone the private capabilities MCP
+      - name: Rewrite ssh github URLs to https (for the public accelerator dep)
         if: ${{ env.GITHUB_TOKEN != '' }}
-        run: git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+        run: |
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global --add url."https://github.com/".insteadOf "git@github.com:"
+
+      - name: Pre-build the reviewer MCP (@verevoir/capabilities)
+        if: ${{ env.GITHUB_TOKEN != '' }}
+        run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/repos/verevoir/capabilities)
+          echo "capabilities API access with this token -> HTTP $code"
+          D="/home/runner/.antagonistic-review-mcp"
+          rm -rf "$D"
+          git clone --depth 1 --branch v0.1.0 "https://x-access-token:${GITHUB_TOKEN}@github.com/verevoir/capabilities.git" "$D"
+          # full install (incl. devDeps) so prepare/tsc can build capabilities and its
+          # accelerator dep; `npm install -g <path>` skips devDeps and the build fails.
+          ( cd "$D" && npm install --no-audit --no-fund )
+          test -f "$D/dist/bin.js" && echo "reviewer MCP built at $D/dist/bin.js"
 
       - name: Adversarial review against the provisioned practices
         id: review
