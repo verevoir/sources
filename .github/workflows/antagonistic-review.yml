@@ -79,11 +79,13 @@ jobs:
           code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/repos/verevoir/capabilities)
           echo "capabilities API access with this token -> HTTP $code"
           D="/home/runner/.antagonistic-review-mcp"
+          # Pin the reviewer MCP to an IMMUTABLE commit (not a moveable tag), then
+          # `npm ci` against its committed lockfile — integrity-checked, audited and
+          # reproducible, so the rubric-loading dependency is verifiable.
+          CAPS_SHA="bca3a42dfd9a44c6341873f90ed78c29bacb6a21"
           rm -rf "$D"
-          git clone --depth 1 --branch v0.1.0 "https://x-access-token:${GITHUB_TOKEN}@github.com/verevoir/capabilities.git" "$D"
-          # full install (incl. devDeps) so prepare/tsc can build capabilities and its
-          # accelerator dep; `npm install -g <path>` skips devDeps and the build fails.
-          ( cd "$D" && npm install --no-audit --no-fund )
+          git clone --filter=blob:none --no-checkout "https://x-access-token:${GITHUB_TOKEN}@github.com/verevoir/capabilities.git" "$D"
+          ( cd "$D" && git checkout --quiet "$CAPS_SHA" && npm ci --no-fund )
           test -f "$D/dist/bin.js" && echo "reviewer MCP built at $D/dist/bin.js"
 
       - name: Adversarial review against the provisioned practices
