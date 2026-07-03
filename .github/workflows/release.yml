@@ -1,0 +1,31 @@
+name: release
+
+# Publish to GitHub Packages so private @verevoir consumers (which route the whole
+# scope there to reach the private @verevoir/capabilities) can resolve this lib. It
+# stays public on npmjs; this ADDS the GitHub Packages copy. workflow_dispatch
+# backfills the current version; a v* tag publishes future releases. Built-in token.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish-github-packages:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Publish to GitHub Packages
+        run: |
+          printf '//npm.pkg.github.com/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > "$RUNNER_TEMP/.npmrc"
+          npm publish --userconfig "$RUNNER_TEMP/.npmrc" --registry https://npm.pkg.github.com
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
