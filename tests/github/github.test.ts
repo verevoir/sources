@@ -10,6 +10,7 @@ import {
   ensureFork,
   openPullRequest,
   parseGithubRepoUrl,
+  commitFiles,
 } from '../../src/github/index.js';
 
 const env: SourceEnv = { token: 'test-token', forkOrg: 'verevoir' };
@@ -322,5 +323,72 @@ describe('openPullRequest', () => {
       head: 'verevoir:aigency/TP-5',
       base: 'main',
     });
+  });
+});
+
+describe('commitFiles (atomic multi-file via the Git Data API)', () => {
+  it('throws on an empty files array', async () => {
+    await expect(commitFiles(env, 'https://github.com/o/r', 'main', [], 'msg')).rejects.toThrow(
+      /must not be empty/
+    );
+  });
+
+  it('creates blobs, a tree on the base, a commit on the tip, and moves the ref', async () => {
+    scriptFetch([
+      {
+        matchMethod: 'GET',
+        matchPath: /git\/refs\/heads\/main$/,
+        status: 200,
+        body: { object: { sha: 'tip' } },
+      },
+      {
+        matchMethod: 'GET',
+        matchPath: /git\/refs\/heads\/main$/,
+        status: 200,
+        body: { object: { sha: 'tip' } },
+      },
+      {
+        matchMethod: 'GET',
+        matchPath: /git\/commits\/tip$/,
+        status: 200,
+        body: { tree: { sha: 'basetree' } },
+      },
+      { matchMethod: 'POST', matchPath: /git\/blobs$/, status: 201, body: { sha: 'blobA' } },
+      { matchMethod: 'POST', matchPath: /git\/blobs$/, status: 201, body: { sha: 'blobB' } },
+      { matchMethod: 'POST', matchPath: /git\/trees$/, status: 201, body: { sha: 'newtree' } },
+      { matchMethod: 'POST', matchPath: /git\/commits$/, status: 201, body: { sha: 'newcommit' } },
+      { matchMethod: 'PATCH', matchPath: /git\/refs\/heads\/main$/, status: 200, body: {} },
+    ]);
+
+    await commitFiles(
+      env,
+      'https://github.com/o/r',
+      'main',
+      [
+        { path: 'a.txt', content: 'AAA' },
+        { path: 'dir/b.txt', content: 'BBB' },
+      ],
+      'atomic commit'
+    );
+
+    const treeCall = calls.find((c) => /git\/trees$/.test(c.url))!;
+    const treeBody = JSON.parse(treeCall.init.body as string);
+    expect(treeBody.base_tree).toBe('basetree');
+    expect(treeBody.tree).toEqual([
+      { path: 'a.txt', mode: '100644', type: 'blob', sha: 'blobA' },
+      { path: 'dir/b.txt', mode: '100644', type: 'blob', sha: 'blobB' },
+    ]);
+
+    const commitCall = calls.find(
+      (c) => /git\/commits$/.test(c.url) && (c.init.method ?? '').toUpperCase() === 'POST'
+    )!;
+    expect(JSON.parse(commitCall.init.body as string)).toMatchObject({
+      message: 'atomic commit',
+      tree: 'newtree',
+      parents: ['tip'],
+    });
+
+    const patchCall = calls.find((c) => (c.init.method ?? '').toUpperCase() === 'PATCH')!;
+    expect(JSON.parse(patchCall.init.body as string)).toEqual({ sha: 'newcommit' });
   });
 });

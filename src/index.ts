@@ -105,6 +105,22 @@ export interface SourceAdapter {
     branch: string,
     commitMessage: string
   ): Promise<void>;
+  /** Commit multiple files together on `branch` (creating it if missing),
+   * rather than N separate writeFile commits. Atomicity is backend-specific:
+   * GitHub is atomic — one Git Data API commit whose ref moves only after
+   * every blob/tree/commit step succeeds, so a failure leaves no partial
+   * state. fs is best-effort locally — it writes the files, then (when the
+   * root is a git repo) stages + commits; a git failure throws but the
+   * already-written files are NOT rolled back, so on error the caller should
+   * inspect the working tree. Notion degrades to sequential writeFile. Empty
+   * `files` throws. */
+  commitFiles(
+    env: SourceEnv,
+    repoUrl: string,
+    branch: string,
+    files: { path: string; content: string }[],
+    commitMessage: string
+  ): Promise<void>;
   ensureBranch(env: SourceEnv, repoUrl: string, branch: string): Promise<void>;
   ensureFork(env: SourceEnv, upstreamUrl: string): Promise<string>;
   openPullRequest(

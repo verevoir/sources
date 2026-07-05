@@ -121,6 +121,7 @@ listFiles(env, repoUrl, prefix, ref?)      → Promise<DirEntry[]>
 getRepoTree(env, repoUrl, ref?)            → Promise<RepoTree>
 isFresh(env, repoUrl, path, version, ref?) → Promise<boolean>
 writeFile(env, repoUrl, path, content, branch, message) → Promise<void>
+commitFiles(env, repoUrl, branch, files[], message) → Promise<void>
 ensureBranch(env, repoUrl, branch)         → Promise<void>
 ensureFork(env, upstreamUrl)               → Promise<string>
 openPullRequest(env, target, head, base, title, body) → Promise<string>

@@ -396,6 +396,26 @@ export async function writeFile(
   }
 }
 
+/** Commit multiple files as a degrade: loop and call writeFile for
+ * each. Notion has no atomic multi-write primitive or branch/commit
+ * model. Throws SourceApiError on empty files. */
+export async function commitFiles(
+  env: SourceEnv,
+  rootUrl: string,
+  branch: string,
+  files: { path: string; content: string }[],
+  commitMessage: string
+): Promise<void> {
+  void branch;
+  void commitMessage;
+  if (files.length === 0) {
+    throw new SourceApiError('commitFiles: files array must not be empty');
+  }
+  for (const file of files) {
+    await writeFile(env, rootUrl, file.path, file.content, '', '');
+  }
+}
+
 /** No-op. Notion has no branch concept. */
 export async function ensureBranch(env: SourceEnv, rootUrl: string, branch: string): Promise<void> {
   void env;
@@ -449,6 +469,7 @@ export const notion = {
   getRepoTree,
   isFresh,
   writeFile,
+  commitFiles,
   ensureBranch,
   ensureFork,
   openPullRequest,

@@ -309,3 +309,33 @@ describe('not-applicable operations', () => {
     await expect(getDefaultBranch(ENV, ROOT_URL)).resolves.toBe('live');
   });
 });
+
+describe('commitFiles (degrades to sequential writes)', () => {
+  it('throws on an empty files array', async () => {
+    const { commitFiles } = await import('../../src/notion/index.js');
+    await expect(commitFiles(ENV, ROOT_URL, 'main', [], 'msg')).rejects.toThrow(
+      /must not be empty/
+    );
+  });
+
+  it('writes each file via updateMarkdown (one call per file)', async () => {
+    clientStub.pages.updateMarkdown.mockResolvedValue({});
+    const { commitFiles } = await import('../../src/notion/index.js');
+    await commitFiles(
+      ENV,
+      ROOT_URL,
+      'main',
+      [
+        { path: '', content: '# One' },
+        { path: '', content: '# Two' },
+      ],
+      'msg'
+    );
+    const calls = clientStub.pages.updateMarkdown.mock.calls;
+    expect(calls).toHaveLength(2);
+    // each file's content is passed through to the SDK — the sequential-write degrade
+    const passed = JSON.stringify(calls);
+    expect(passed).toContain('# One');
+    expect(passed).toContain('# Two');
+  });
+});

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.0 — 2026-07-05
+
+- **New: `commitFiles(env, repoUrl, branch, files[], commitMessage)` on the SourceAdapter contract** — commits multiple files as one atomic unit on a branch (creating it if missing), replacing N separate `writeFile` commits. GitHub makes a single commit via the Git Data API (blobs → tree on the branch's base tree → commit parenting the tip → move the ref); the fs adapter writes the files and, when the root is a git repo, checks out the branch and stages + commits — the same branch model GitHub has — surfacing any git failure rather than leaving a silent half-state; Notion degrades to sequential `writeFile`. (STDIO-535.)
+
 ## 0.5.0 — 2026-05-26
 
 - **Notion adapter uses the SDK's native Markdown conversion.** `readFile` now reads page bodies via `pages.retrieveMarkdown` and `writeFile` writes via `pages.updateMarkdown` (`replace_content` with `allow_deleting_content`), dropping the ~430-line hand-rolled block↔Markdown converter (`fetchAllBlocks` / `blocksToMarkdown` / `markdownToBlocks` / language-alias map). Same read/write contract, far less surface to maintain, and no more block-shape drift (the class of bug behind the earlier `updateMarkdown` fix). `readFile` treats a 404 on the body endpoint as an empty body (the page itself still resolves). Page-tree navigation (`listFiles` / `getRepoTree` / `resolvePath`) still walks child blocks directly. **Removed:** the internal `markdownToBlocks` export (test-only; no external consumers). (STDIO-42.)

@@ -314,6 +314,104 @@ export async function openPullRequest(
   return data.html_url;
 }
 
+/** Commit multiple files as ONE atomic commit via the Git Data API — the
+ * branch ref is moved only after the new tree and commit are built, so a
+ * failure at any step leaves the branch untouched (no partial write). This
+ * is why it uses the low-level git API rather than the contents API, which
+ * is one-commit-per-file. Throws on empty files or any failed API step. */
+export async function commitFiles(
+  env: SourceEnv,
+  repoUrl: string,
+  branch: string,
+  files: { path: string; content: string }[],
+  commitMessage: string
+): Promise<void> {
+  if (files.length === 0) {
+    throw new SourceApiError('commitFiles: files array must not be empty');
+  }
+  const { owner, repo } = coords(repoUrl);
+
+  await ensureBranch(env, repoUrl, branch);
+
+  const branchRef = await ghCall<{ object?: { sha?: string } }>(
+    env,
+    'GET',
+    `/repos/${owner}/${repo}/git/refs/heads/${branch}`
+  );
+  const tipSha = branchRef.object?.sha;
+  if (!tipSha) {
+    throw new SourceApiError(`Could not resolve branch tip SHA for ${owner}/${repo}@${branch}`);
+  }
+
+  const commitData = await ghCall<{ tree?: { sha?: string } }>(
+    env,
+    'GET',
+    `/repos/${owner}/${repo}/git/commits/${tipSha}`
+  );
+  const baseTreeSha = commitData.tree?.sha;
+  if (!baseTreeSha) {
+    throw new SourceApiError(
+      `Could not resolve base tree SHA from commit ${tipSha} on ${owner}/${repo}`
+    );
+  }
+
+  const blobShas: string[] = [];
+  for (const file of files) {
+    const blobData = await ghCall<{ sha?: string }>(
+      env,
+      'POST',
+      `/repos/${owner}/${repo}/git/blobs`,
+      {
+        content: Buffer.from(file.content, 'utf8').toString('base64'),
+        encoding: 'base64',
+      }
+    );
+    const blobSha = blobData.sha;
+    if (!blobSha) {
+      throw new SourceApiError(`Could not resolve blob SHA for ${file.path} on ${owner}/${repo}`);
+    }
+    blobShas.push(blobSha);
+  }
+
+  const treeData = await ghCall<{ sha?: string }>(
+    env,
+    'POST',
+    `/repos/${owner}/${repo}/git/trees`,
+    {
+      base_tree: baseTreeSha,
+      tree: files.map((file, i) => ({
+        path: file.path,
+        mode: '100644',
+        type: 'blob',
+        sha: blobShas[i],
+      })),
+    }
+  );
+  const newTreeSha = treeData.sha;
+  if (!newTreeSha) {
+    throw new SourceApiError(`Could not resolve tree SHA after creating tree on ${owner}/${repo}`);
+  }
+
+  const newCommitData = await ghCall<{ sha?: string }>(
+    env,
+    'POST',
+    `/repos/${owner}/${repo}/git/commits`,
+    {
+      message: commitMessage,
+      tree: newTreeSha,
+      parents: [tipSha],
+    }
+  );
+  const newCommitSha = newCommitData.sha;
+  if (!newCommitSha) {
+    throw new SourceApiError(`Could not resolve new commit SHA on ${owner}/${repo}`);
+  }
+
+  await ghCall(env, 'PATCH', `/repos/${owner}/${repo}/git/refs/heads/${branch}`, {
+    sha: newCommitSha,
+  });
+}
+
 /** Aggregate export matching the `SourceAdapter` contract from the
  * root package. Lets a caller pass `github` to code that accepts a
  * generic adapter. */
@@ -323,6 +421,7 @@ export const github = {
   getRepoTree,
   isFresh,
   writeFile,
+  commitFiles,
   ensureBranch,
   ensureFork,
   openPullRequest,
