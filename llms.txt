@@ -73,6 +73,7 @@ listFiles(env, repoUrl, prefix, ref?) → Promise<DirEntry[]>
 getRepoTree(env, repoUrl, ref?) → Promise<RepoTree>
 isFresh(env, repoUrl, path, version, ref?) → Promise<boolean>  // cheap "is held version still current?" check used by cache layers
 writeFile(env, repoUrl, path, content, branch, message) → Promise<void>
+commitFiles(env, repoUrl, branch, files[], message) → Promise<void>  // multi-file commit — atomic on GitHub (Git Data API); best-effort on fs (writes then commits when the root is a git repo); Notion degrades to sequential writes
 ensureBranch(env, repoUrl, branch) → Promise<void>
 ensureFork(env, upstreamUrl) → Promise<string>
 openPullRequest(env, target, head, base, title, body) → Promise<string>

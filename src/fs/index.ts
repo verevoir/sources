@@ -15,16 +15,20 @@
 // `envFromProcessEnv` returns a valid one even with no GITHUB_TOKEN
 // when this adapter is the target.
 //
-// What this is NOT yet:
-//   - Git-aware. Writes go straight to disk; no commit, no branch.
-//     Future: opt-in `git checkout -b` + `git commit` for repos
-//     that are git-managed and want the SourceAdapter to track that.
+// Git-awareness is scoped to `commitFiles`: `writeFile` still writes
+// straight to disk (no commit, no branch), but `commitFiles` stages +
+// commits on the branch when the root is a git repo (best-effort — the
+// files are written first and are not rolled back if the commit fails).
+//
+// What this is NOT:
 //   - Forkable. `ensureFork` and `openPullRequest` throw — they
 //     don't have a local-FS equivalent.
 
 import { promises as fsPromises } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   SourceApiError,
   type SourceEnv,
@@ -48,6 +52,8 @@ const IGNORED_DIRS = new Set([
   '.idea',
   '.vscode',
 ]);
+
+const execFileAsync = promisify(execFile);
 
 const DEFAULT_TREE_CAP = 5000;
 
@@ -213,6 +219,88 @@ export async function writeFile(
   await fsPromises.writeFile(safe, content, 'utf8');
 }
 
+/** Reject a branch name that isn't a safe git ref before it reaches
+ * `git checkout -B` — a `-`-prefixed name would be read as an option, and the
+ * rest are git ref-name rules (no whitespace or `~^:?*[\`, no `..` / `//` /
+ * `@{`, no leading/trailing `/`, no trailing `.`). Validating at the boundary
+ * means an unsafe branch is rejected before any file is written. */
+function assertSafeBranch(branch: string): void {
+  const unsafe =
+    branch.length === 0 ||
+    branch.startsWith('-') ||
+    branch.startsWith('/') ||
+    branch.endsWith('/') ||
+    branch.endsWith('.') ||
+    branch.includes('..') ||
+    branch.includes('//') ||
+    branch.includes('@{') ||
+    /[\s~^:?*[\\]/.test(branch);
+  if (unsafe) {
+    throw new SourceApiError(
+      `commitFiles: unsafe branch name for fs git: ${JSON.stringify(branch)}`
+    );
+  }
+}
+
+/** Write every file, then — when the root is a git repo — check out `branch`,
+ * stage, and commit. Best-effort locally: on a git failure the written files are
+ * left on disk (the error names them; see the SourceAdapter contract). A non-git
+ * root just gets the writes. Throws on empty files or an unsafe branch name. */
+export async function commitFiles(
+  env: SourceEnv,
+  root: string,
+  branch: string,
+  files: { path: string; content: string }[],
+  commitMessage: string
+): Promise<void> {
+  void env;
+  if (files.length === 0) {
+    throw new SourceApiError('commitFiles: files array must not be empty');
+  }
+
+  const gitDirPath = join(root, '.git');
+  let isGitRepo = false;
+  try {
+    await fsPromises.stat(gitDirPath);
+    isGitRepo = true;
+  } catch {
+    isGitRepo = false;
+  }
+
+  // Validate the branch before writing anything, so an unsafe ref is rejected
+  // with no side effect (no files left on disk).
+  if (isGitRepo) {
+    assertSafeBranch(branch);
+  }
+
+  const writtenPaths: string[] = [];
+  for (const file of files) {
+    const safe = ensureSafePath(root, file.path);
+    await fsPromises.mkdir(dirname(safe), { recursive: true });
+    await fsPromises.writeFile(safe, file.content, 'utf8');
+    writtenPaths.push(file.path);
+  }
+
+  if (!isGitRepo) {
+    return;
+  }
+
+  try {
+    await execFileAsync('git', ['checkout', '-B', branch], { cwd: root });
+    await execFileAsync('git', ['add', '--', ...writtenPaths], { cwd: root });
+    await execFileAsync('git', ['commit', '-m', commitMessage], { cwd: root });
+  } catch (err) {
+    // fs commitFiles is best-effort locally (see the SourceAdapter contract):
+    // the files are already on disk, so surface the git failure AND the paths
+    // left written, rather than swallowing it into a false success.
+    const gitErr = err as { stderr?: string };
+    throw new SourceApiError(
+      `commitFiles: git staging/commit failed for ${root}@${branch} ` +
+        `(left on disk: ${writtenPaths.join(', ')}): ${gitErr?.stderr ?? String(err)}`
+    );
+  }
+}
+
 /** No-op at v0. FS has no branch concept here. Future: opt-in
  * `git checkout -b` when the root is a git repo. */
 export async function ensureBranch(env: SourceEnv, root: string, branch: string): Promise<void> {
@@ -264,6 +352,7 @@ export const fs = {
   getRepoTree,
   isFresh,
   writeFile,
+  commitFiles,
   ensureBranch,
   ensureFork,
   openPullRequest,
