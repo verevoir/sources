@@ -9,6 +9,7 @@ import {
   writeFile,
   ensureFork,
   openPullRequest,
+  mergePullRequest,
   parseGithubRepoUrl,
   commitFiles,
 } from '../../src/github/index.js';
@@ -323,6 +324,47 @@ describe('openPullRequest', () => {
       head: 'verevoir:aigency/TP-5',
       base: 'main',
     });
+  });
+});
+
+describe('mergePullRequest', () => {
+  it('PUTs the merge with the strategy and reports merged', async () => {
+    scriptFetch([
+      {
+        matchMethod: 'PUT',
+        matchPath: /\/repos\/foo\/bar\/pulls\/42\/merge$/,
+        status: 200,
+        body: { merged: true },
+      },
+    ]);
+    const merged = await mergePullRequest(env, 'foo/bar', 42);
+    expect(merged).toBe(true);
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ merge_method: 'merge' });
+  });
+
+  it('accepts a PR html_url, parsing the number, and honours the method', async () => {
+    scriptFetch([
+      { matchMethod: 'PUT', matchPath: /\/pulls\/7\/merge$/, status: 200, body: { merged: true } },
+    ]);
+    const merged = await mergePullRequest(
+      env,
+      'foo/bar',
+      'https://github.com/foo/bar/pull/7',
+      'squash'
+    );
+    expect(merged).toBe(true);
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ merge_method: 'squash' });
+  });
+
+  it('throws when a url carries no PR number', async () => {
+    await expect(mergePullRequest(env, 'foo/bar', 'https://github.com/foo/bar')).rejects.toThrow(
+      SourceApiError
+    );
+  });
+
+  it('surfaces a refused merge (405 not mergeable) as a SourceApiError', async () => {
+    scriptFetch([{ matchMethod: 'PUT', status: 405, text: 'Pull Request is not mergeable' }]);
+    await expect(mergePullRequest(env, 'foo/bar', 42)).rejects.toThrow(SourceApiError);
   });
 });
 

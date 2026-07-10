@@ -131,6 +131,16 @@ export interface SourceAdapter {
     title: string,
     body: string
   ): Promise<string>;
+  /** Merge an open pull request (by number or its html_url). `method` selects the
+   * host merge strategy (default a merge commit). Resolves true when merged;
+   * throws when the host cannot merge (conflicts, checks not green) or the source
+   * has no PR concept. */
+  mergePullRequest(
+    env: SourceEnv,
+    targetUrl: string,
+    pull: number | string,
+    method?: 'merge' | 'squash' | 'rebase'
+  ): Promise<boolean>;
   getDefaultBranch(env: SourceEnv, repoUrl: string): Promise<string>;
 }
 
