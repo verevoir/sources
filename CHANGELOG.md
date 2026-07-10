@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — 2026-07-10
 
-- **New: `mergePullRequest(env, targetUrl, pull, method?)` on the SourceAdapter contract** — merges an open PR by number or its html_url; `method` selects the strategy (`merge` | `squash` | `rebase`, default a merge commit). GitHub calls `PUT /pulls/{n}/merge` and returns the merged boolean; a refused merge (e.g. 405 not mergeable — conflicts or required checks not green) surfaces as a `SourceApiError`. The fs and Notion adapters throw 501, symmetric with `openPullRequest`. Completes the open→merge PR lifecycle on the contract. (STDIO-565.)
+- **New: `mergePullRequest(env, targetUrl, pull, method?)` on the SourceAdapter contract** — merges an open PR by number, a numeric string, or its html_url; `method` selects the strategy (`merge` | `squash` | `rebase`, default a merge commit). GitHub calls `PUT /pulls/{n}/merge` and returns the merged boolean; a refused merge (e.g. 405 not mergeable — conflicts or required checks not green) surfaces as a `SourceApiError`. The fs and Notion adapters throw 501, symmetric with `openPullRequest`. Completes the open→merge PR lifecycle on the contract. (STDIO-565.)
 
 ## 0.7.0 — 2026-07-05
 

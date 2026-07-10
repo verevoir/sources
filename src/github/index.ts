@@ -412,18 +412,21 @@ export async function commitFiles(
   });
 }
 
-/** The PR number from a number or a `.../pull/<n>` html_url. */
+/** The PR number from a number, a bare numeric string, or a `.../pull/<n>` html_url. */
 function prNumber(pull: number | string): number {
   if (typeof pull === 'number') return pull;
-  const m = /\/pull\/(\d+)/.exec(pull);
+  const trimmed = pull.trim();
+  if (/^\d+$/.test(trimmed)) return Number(trimmed);
+  const m = /\/pull\/(\d+)/.exec(trimmed);
   if (!m) throw new SourceApiError(`Cannot parse a PR number from: ${pull}`);
   return Number(m[1]);
 }
 
-/** Merge an open pull request via `PUT /pulls/{n}/merge`. Accepts the PR number
- * or its html_url; `method` selects the merge strategy. Returns true when GitHub
- * reports the PR merged; ghCall throws a SourceApiError when the merge is refused
- * (e.g. 405 not mergeable — conflicts or required checks not green). */
+/** Merge an open pull request via `PUT /pulls/{n}/merge`. Accepts the PR number,
+ * a numeric string, or its html_url; `method` selects the merge strategy. Returns
+ * true when GitHub reports the PR merged, and false for the (unexpected) 200 that
+ * omits `merged: true`; a refused merge is a non-2xx that ghCall throws as a
+ * SourceApiError (e.g. 405 not mergeable — conflicts or required checks not green). */
 export async function mergePullRequest(
   env: SourceEnv,
   targetUrl: string,

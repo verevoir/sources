@@ -366,6 +366,18 @@ describe('mergePullRequest', () => {
     scriptFetch([{ matchMethod: 'PUT', status: 405, text: 'Pull Request is not mergeable' }]);
     await expect(mergePullRequest(env, 'foo/bar', 42)).rejects.toThrow(SourceApiError);
   });
+
+  it('accepts a bare numeric string as the PR number', async () => {
+    scriptFetch([
+      { matchMethod: 'PUT', matchPath: /\/pulls\/42\/merge$/, status: 200, body: { merged: true } },
+    ]);
+    expect(await mergePullRequest(env, 'foo/bar', '42')).toBe(true);
+  });
+
+  it('returns false on a 200 that does not report merged (defensive, not an error)', async () => {
+    scriptFetch([{ matchMethod: 'PUT', status: 200, body: {} }]);
+    expect(await mergePullRequest(env, 'foo/bar', 42)).toBe(false);
+  });
 });
 
 describe('commitFiles (atomic multi-file via the Git Data API)', () => {
