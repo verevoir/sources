@@ -178,7 +178,7 @@ jobs:
           # Pin the reviewer MCP to an IMMUTABLE commit (not a moveable tag), then
           # `npm ci` against its committed lockfile — integrity-checked, audited and
           # reproducible, so the rubric-loading dependency is verifiable.
-          CAPS_SHA="bca3a42dfd9a44c6341873f90ed78c29bacb6a21"
+          CAPS_SHA="2b7a51bf2d4c8afba7faaa59cf5843daa83d6e79"
           rm -rf "$D"
           # Auth as a repo-local http.extraheader (see the file header for why) — written
           # via a redirect so the token stays out of argv, and masked in logs.
