@@ -60,17 +60,26 @@ jobs:
   review:
     name: review (${{ matrix.lens }})
     runs-on: ubuntu-latest
-    # Envelope exceeds the sum of the inner bounds so those, not this backstop,
-    # bind — a hung step then fails legibly AT THE STEP rather than as an
-    # anonymous job timeout that names nothing.
+    # Envelope above the sum of the bounds that exist, so that where a step IS
+    # bounded it is the step that fails and names itself, rather than an
+    # anonymous job timeout twenty minutes later.
     #
     #   checkout 5 + head-fetch 2 + MCP setup 8 + corpus 3 + model 12 = 30m
+    #
+    # Stated precisely, because the reassuring version of this sentence is not
+    # true here: those five are the only bounded steps. Mint, preflight,
+    # empty-diff-guard, url-rewrite and publish carry no bound of any kind, so a
+    # hang in one of them runs to the ENVELOPE and reports as a job timeout that
+    # names nothing. That is a real gap in this generation of the workflow, and
+    # this comment is not the place to fix it — it is the place to stop claiming
+    # it is already fixed.
     #
     # The corpus step takes the sum to exactly 30, which was the envelope: at
     # equal values the backstop is the first thing that can fire, so it goes to
     # 40. Adding a step without re-checking this is how the invariant inverts —
     # it had already inverted in `context` (30m envelope over 43m of steps) and
-    # nothing noticed. See STDIO-664.
+    # nothing noticed. Bounding the remaining steps, and computing this sum
+    # rather than writing it down, is STDIO-664.
     timeout-minutes: 40
     strategy:
       fail-fast: false
