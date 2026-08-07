@@ -335,6 +335,22 @@ export async function openPullRequest(
   );
 }
 
+/** Not applicable to the FS adapter — throws. */
+export async function mergePullRequest(
+  env: SourceEnv,
+  targetUrl: string,
+  pull: number | string,
+  method?: 'merge' | 'squash' | 'rebase'
+): Promise<boolean> {
+  void env;
+  void pull;
+  void method;
+  throw new SourceApiError(
+    `Pull requests are not supported for the filesystem source: ${targetUrl}`,
+    501
+  );
+}
+
 /** Returns a stable sentinel so callers that branch on default-
  * branch-name don't break. Future: read `.git/HEAD` when the root
  * is a git repo. */
@@ -356,5 +372,6 @@ export const fs = {
   ensureBranch,
   ensureFork,
   openPullRequest,
+  mergePullRequest,
   getDefaultBranch,
 };

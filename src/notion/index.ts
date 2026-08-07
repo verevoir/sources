@@ -452,6 +452,22 @@ export async function openPullRequest(
   );
 }
 
+/** Not applicable to Notion — throws. */
+export async function mergePullRequest(
+  env: SourceEnv,
+  targetUrl: string,
+  pull: number | string,
+  method?: 'merge' | 'squash' | 'rebase'
+): Promise<boolean> {
+  void env;
+  void pull;
+  void method;
+  throw new SourceApiError(
+    `Pull requests are not supported for the Notion source: ${targetUrl}`,
+    501
+  );
+}
+
 /** Returns 'live' as a stable sentinel. Notion has no branch /
  * default-branch concept; callers that branch on default-branch-name
  * stay correct without special-casing the adapter. */
@@ -473,5 +489,6 @@ export const notion = {
   ensureBranch,
   ensureFork,
   openPullRequest,
+  mergePullRequest,
   getDefaultBranch,
 };
