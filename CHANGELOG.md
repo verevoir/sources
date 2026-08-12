@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.0 — 2026-07-10
+
+- **New: `mergePullRequest(env, targetUrl, pull, method?)` on the SourceAdapter contract** — merges an open PR by number, a numeric string, or its html_url; `method` selects the strategy (`merge` | `squash` | `rebase`, default a merge commit). GitHub calls `PUT /pulls/{n}/merge` and returns the merged boolean; a refused merge (e.g. 405 not mergeable — conflicts or required checks not green) surfaces as a `SourceApiError`. The fs and Notion adapters throw 501, symmetric with `openPullRequest`. Completes the open→merge PR lifecycle on the contract. (STDIO-565.)
+
 ## 0.7.0 — 2026-07-05
 
 - **New: `commitFiles(env, repoUrl, branch, files[], commitMessage)` on the SourceAdapter contract** — commits multiple files as one atomic unit on a branch (creating it if missing), replacing N separate `writeFile` commits. GitHub makes a single commit via the Git Data API (blobs → tree on the branch's base tree → commit parenting the tip → move the ref); the fs adapter writes the files and, when the root is a git repo, checks out the branch and stages + commits — the same branch model GitHub has — surfacing any git failure rather than leaving a silent half-state; Notion degrades to sequential `writeFile`. (STDIO-535.)

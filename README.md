@@ -89,7 +89,7 @@ await writeFile(
 );
 ```
 
-`ensureFork` and `openPullRequest` throw 501 on the FS adapter — there's no local-FS equivalent. The customer manages git operations themselves.
+`ensureFork`, `openPullRequest` and `mergePullRequest` throw 501 on the FS adapter — there's no local-FS equivalent. The customer manages git operations themselves.
 
 ## Fork-pivot pattern
 
@@ -125,6 +125,7 @@ commitFiles(env, repoUrl, branch, files[], message) → Promise<void>
 ensureBranch(env, repoUrl, branch)         → Promise<void>
 ensureFork(env, upstreamUrl)               → Promise<string>
 openPullRequest(env, target, head, base, title, body) → Promise<string>
+mergePullRequest(env, target, pull, method?)          → Promise<boolean>
 getDefaultBranch(env, repoUrl)             → Promise<string>
 ```
 
