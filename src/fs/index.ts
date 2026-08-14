@@ -286,12 +286,21 @@ function assertSafeBranch(branch: string): void {
  * sentence git had already written.
  *
  * Every stream, in order, and only a non-empty one is believed.
+ *
+ * Exported for its own tests. Three of its four branches are unreachable
+ * through `commitFiles` — git has to be induced to fail in a specific way to
+ * reach each — and a fallback chain whose fallbacks are never exercised is how
+ * this bug got here in the first place.
  */
-function gitDetail(err: unknown): string {
+export function gitDetail(err: unknown): string {
   const e = err as { stderr?: string; stdout?: string; message?: string };
   for (const candidate of [e?.stderr, e?.stdout, e?.message, String(err)]) {
     const text = (candidate ?? '').trim();
-    if (text.length > 0) return text;
+    // `[object Object]` is what String() gives for the error shapes that reach
+    // here, and it is not an explanation — it is the absence of one wearing
+    // enough characters to pass a length check. Found by a test asserting the
+    // final fallback, which until then was unreachable.
+    if (text.length > 0 && text !== '[object Object]') return text;
   }
   return 'git failed and said nothing on any stream';
 }
