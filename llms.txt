@@ -72,6 +72,7 @@ readFile(env, repoUrl, path, ref?) → Promise<{ content, sha }>
 listFiles(env, repoUrl, prefix, ref?) → Promise<DirEntry[]>
 getRepoTree(env, repoUrl, ref?) → Promise<RepoTree>
 isFresh(env, repoUrl, path, version, ref?) → Promise<boolean>  // cheap "is held version still current?" check used by cache layers
+// ref: honoured by GITHUB only. FS reads a working tree and cannot resolve one, so a NON-EMPTY ref now throws SourceApiError rather than silently answering about whatever is checked out ('' and absent mean "current"). NOTION still accepts-and-ignores it — the same silent-substitution defect, not yet fixed there.
 writeFile(env, repoUrl, path, content, branch, message) → Promise<void>
 commitFiles(env, repoUrl, branch, files[], message) → Promise<void>  // multi-file commit — atomic on GitHub (Git Data API); best-effort on fs (writes then commits when the root is a git repo); Notion degrades to sequential writes
 ensureBranch(env, repoUrl, branch) → Promise<void>

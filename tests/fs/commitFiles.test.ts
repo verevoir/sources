@@ -148,4 +148,29 @@ describe('fs adapter: commitFiles', () => {
     // rejected before any write — nothing was left on disk
     await expect(fsPromises.readFile(join(tempDir, 'x.txt'), 'utf8')).rejects.toThrow();
   });
+  it('says what git said, even when git said it on stdout (never an empty tail)', async () => {
+    // The defect: `stderr ?? String(err)` produced a message ending in a colon
+    // with nothing after it. Git writes "nothing to commit" to STDOUT, so the
+    // field read was empty — and `??` falls back only on null/undefined, so an
+    // empty string passed through as though it were the explanation. A consumer
+    // did reflog archaeology to recover a sentence git had already written.
+    const env = { token: '', forkOrg: '' };
+    await execFileAsync('git', ['init', tempDir]);
+    await execFileAsync('git', ['config', 'user.email', 'test@example.com'], { cwd: tempDir });
+    await execFileAsync('git', ['config', 'user.name', 'Test User'], { cwd: tempDir });
+    await fsPromises.writeFile(join(tempDir, 'same.txt'), 'unchanged\n', 'utf8');
+    await execFileAsync('git', ['add', '-A'], { cwd: tempDir });
+    await execFileAsync('git', ['commit', '-m', 'first'], { cwd: tempDir });
+
+    // Committing identical content: git refuses, and says why on stdout.
+    const failure = await fs
+      .commitFiles(env, tempDir, 'main', [{ path: 'same.txt', content: 'unchanged\n' }], 'again')
+      .then(
+        () => new Error('expected a failure'),
+        (e: unknown) => e as Error
+      );
+
+    expect(failure.message).not.toMatch(/:\s*$/);
+    expect(failure.message).toMatch(/nothing to commit/i);
+  });
 });

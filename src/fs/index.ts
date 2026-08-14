@@ -1,8 +1,11 @@
 // @verevoir/sources/fs — local filesystem adapter
 //
 // Implements the SourceAdapter contract over a local directory root.
-// `repoUrl` is interpreted as an absolute filesystem path; `ref` is
-// accepted-but-ignored at v0 (FS has no branching concept here).
+// `repoUrl` is interpreted as an absolute filesystem path. A non-empty `ref` is
+// REFUSED: this reads a working tree, which is whatever is checked out, so
+// there is no version of "read this at main" it can answer — and it used to
+// answer anyway, with the working tree, silently. An empty or absent ref means
+// "current" and is the normal case. See `refuseRef`.
 //
 // Designed for the "developer running aigency locally" case (per
 // `project_notion_and_fs_sources_candidate_this_week`): point the
@@ -76,6 +79,35 @@ function ensureSafePath(root: string, relativePath: string): string {
   return abs;
 }
 
+/**
+ * Refuse a ref this adapter cannot honour.
+ *
+ * A filesystem adapter reads a working tree, and a working tree is whatever is
+ * checked out — so there is no version of `readFile(…, 'main')` this can answer
+ * correctly. Until now it answered anyway: `void ref`, four times, and the
+ * caller got the working tree with no indication it had asked an unanswerable
+ * question.
+ *
+ * That is not a small imprecision. A consumer grepped at `main` for a string it
+ * knew was in that commit, got nothing back, and concluded the string was
+ * absent — a discriminating check, run correctly, returning a confident wrong
+ * answer in the verbs used for VERIFICATION. Silence is the whole defect: an
+ * error here costs a caller one message, and being wrong costs it the
+ * conclusion it drew.
+ *
+ * An EMPTY ref is not a request. Callers pass `''` as "whatever is current" so
+ * that reads, greps and symbol lookups agree on one cache key, and for a
+ * working tree that is exactly right.
+ */
+function refuseRef(ref: string | undefined, verb: string): void {
+  if (ref === undefined || ref === '') return;
+  throw new SourceApiError(
+    `${verb}: cannot read at ref ${JSON.stringify(ref)} — this is a working tree on disk, not a ` +
+      'git object database. Reading it at a ref would silently answer about whatever is checked ' +
+      'out. Omit the ref, check the ref out first, or address the repository by its remote URL.'
+  );
+}
+
 export async function readFile(
   env: SourceEnv,
   root: string,
@@ -83,7 +115,7 @@ export async function readFile(
   ref?: string
 ): Promise<ReadFileResult> {
   void env;
-  void ref;
+  refuseRef(ref, 'readFile');
   try {
     const safe = ensureSafePath(root, path);
     const content = await fsPromises.readFile(safe, 'utf8');
@@ -103,7 +135,7 @@ export async function listFiles(
   ref?: string
 ): Promise<DirEntry[]> {
   void env;
-  void ref;
+  refuseRef(ref, 'listFiles');
   try {
     const safe = ensureSafePath(root, prefix);
     const items = await fsPromises.readdir(safe, { withFileTypes: true });
@@ -130,7 +162,7 @@ export async function listFiles(
 
 export async function getRepoTree(env: SourceEnv, root: string, ref?: string): Promise<RepoTree> {
   void env;
-  void ref;
+  refuseRef(ref, 'getRepoTree');
   const entries: TreeEntry[] = [];
   let truncated = false;
 
@@ -192,7 +224,7 @@ export async function isFresh(
   ref?: string
 ): Promise<boolean> {
   void env;
-  void ref;
+  refuseRef(ref, 'isFresh');
   try {
     const safe = ensureSafePath(root, path);
     const content = await fsPromises.readFile(safe, 'utf8');
@@ -240,6 +272,36 @@ function assertSafeBranch(branch: string): void {
       `commitFiles: unsafe branch name for fs git: ${JSON.stringify(branch)}`
     );
   }
+}
+
+/**
+ * What git actually said, from whichever stream it said it on.
+ *
+ * This read `stderr ?? String(err)` and produced a message ending in a colon
+ * with nothing after it, for two compounding reasons. Git writes "nothing to
+ * commit" to STDOUT, so the field read was empty; and `??` falls back only on
+ * null/undefined, so an empty string passed through as though it were the
+ * explanation. A consumer spent a diagnosis on reflog archaeology to recover a
+ * sentence git had already written.
+ *
+ * Every stream, in order, and only a non-empty one is believed.
+ *
+ * Exported for its own tests. Three of its four branches are unreachable
+ * through `commitFiles` — git has to be induced to fail in a specific way to
+ * reach each — and a fallback chain whose fallbacks are never exercised is how
+ * this bug got here in the first place.
+ */
+export function gitDetail(err: unknown): string {
+  const e = err as { stderr?: string; stdout?: string; message?: string };
+  for (const candidate of [e?.stderr, e?.stdout, e?.message, String(err)]) {
+    const text = (candidate ?? '').trim();
+    // `[object Object]` is what String() gives for the error shapes that reach
+    // here, and it is not an explanation — it is the absence of one wearing
+    // enough characters to pass a length check. Found by a test asserting the
+    // final fallback, which until then was unreachable.
+    if (text.length > 0 && text !== '[object Object]') return text;
+  }
+  return 'git failed and said nothing on any stream';
 }
 
 /** Write every file, then — when the root is a git repo — check out `branch`,
@@ -293,10 +355,9 @@ export async function commitFiles(
     // fs commitFiles is best-effort locally (see the SourceAdapter contract):
     // the files are already on disk, so surface the git failure AND the paths
     // left written, rather than swallowing it into a false success.
-    const gitErr = err as { stderr?: string };
     throw new SourceApiError(
       `commitFiles: git staging/commit failed for ${root}@${branch} ` +
-        `(left on disk: ${writtenPaths.join(', ')}): ${gitErr?.stderr ?? String(err)}`
+        `(left on disk: ${writtenPaths.join(', ')}): ${gitDetail(err)}`
     );
   }
 }

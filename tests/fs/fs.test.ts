@@ -12,6 +12,7 @@ import {
   ensureFork,
   openPullRequest,
   getDefaultBranch,
+  gitDetail,
 } from '../../src/fs/index.js';
 import { SourceApiError, type SourceEnv } from '../../src/index.js';
 
@@ -197,5 +198,84 @@ describe('not-applicable operations', () => {
 
   it("getDefaultBranch returns 'local'", async () => {
     expect(await getDefaultBranch(env, root)).toBe('local');
+  });
+});
+
+describe('a ref this adapter cannot honour is refused, not ignored', () => {
+  // One verb per test. Four exported functions with four signatures are four
+  // reasons to fail, and bundled they hide every failure after the first.
+  const verbs: [string, (ref: string) => Promise<unknown>][] = [
+    ['readFile', (ref) => readFile(env, root, 'a.txt', ref)],
+    ['listFiles', (ref) => listFiles(env, root, '', ref)],
+    ['getRepoTree', (ref) => getRepoTree(env, root, ref)],
+    ['isFresh', (ref) => isFresh(env, root, 'a.txt', 'sha', ref)],
+  ];
+
+  it.each(verbs)('%s refuses a named ref', async (_name, call) => {
+    // The defect: `void ref` meant a caller asking for `main` got the working
+    // tree with no indication it had asked an unanswerable question. A consumer
+    // grepped at `main` for a string it knew was in that commit, got nothing,
+    // and concluded the string was absent.
+    await fsPromises.writeFile(join(root, 'a.txt'), 'on disk', 'utf8');
+    await expect(call('main')).rejects.toThrow(/cannot read at ref "main"/);
+  });
+
+  it.each(verbs)('%s accepts an empty ref, which is not a request', async (_name, call) => {
+    await fsPromises.writeFile(join(root, 'a.txt'), 'on disk', 'utf8');
+    await expect(call('')).resolves.toBeDefined();
+  });
+
+  it('names the verb and says what to do instead', async () => {
+    await expect(readFile(env, root, 'a.txt', 'v1.2.3')).rejects.toThrow(
+      /^readFile: cannot read at ref "v1\.2\.3"/
+    );
+    await expect(readFile(env, root, 'a.txt', 'v1.2.3')).rejects.toThrow(
+      /Omit the ref, check the ref out first, or address the repository by its remote URL/
+    );
+  });
+
+  it('lets an absent or empty ref through, because that is not a request', async () => {
+    // Callers pass '' as "whatever is current" so reads, greps and symbol
+    // lookups agree on one cache key. For a working tree that is exactly right.
+    await fsPromises.writeFile(join(root, 'b.txt'), 'current', 'utf8');
+
+    await expect(readFile(env, root, 'b.txt', '')).resolves.toMatchObject({ content: 'current' });
+    await expect(readFile(env, root, 'b.txt')).resolves.toMatchObject({ content: 'current' });
+  });
+
+  it('refuses BEFORE touching the filesystem, so a missing file is not the answer', async () => {
+    // Otherwise a ref request against a path that happens not to exist reports
+    // not_found — the caller learns the file is missing, which is not the fact.
+    await expect(readFile(env, root, 'never-existed.txt', 'main')).rejects.toThrow(
+      /cannot read at ref/
+    );
+  });
+});
+
+describe('gitDetail — every stream, in order, first non-empty wins', () => {
+  // The bug this replaces read one field with an operator that treats empty as
+  // present. A fallback chain whose fallbacks are never exercised is how that
+  // happened, so each branch gets its own test.
+  it('prefers stderr, the stream git uses for most failures', () => {
+    expect(gitDetail({ stderr: 'fatal: not a git repository', stdout: 'other' })).toBe(
+      'fatal: not a git repository'
+    );
+  });
+
+  it('falls through an EMPTY stderr to stdout — the case that produced a bare colon', () => {
+    expect(gitDetail({ stderr: '   ', stdout: 'nothing to commit, working tree clean' })).toBe(
+      'nothing to commit, working tree clean'
+    );
+  });
+
+  it('falls through to the error message when neither stream said anything', () => {
+    expect(gitDetail({ stderr: '', stdout: '', message: 'spawn ENOENT' })).toBe('spawn ENOENT');
+  });
+
+  it('never returns empty, even for something that is not an error at all', () => {
+    // A caller reading a blank explanation learns nothing and cannot tell that
+    // is what happened.
+    expect(gitDetail({ stderr: '', stdout: '', message: '' })).toMatch(/said nothing on any/);
+    expect(gitDetail(undefined)).toMatch(/undefined|said nothing/);
   });
 });
