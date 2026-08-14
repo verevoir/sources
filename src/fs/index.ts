@@ -76,6 +76,35 @@ function ensureSafePath(root: string, relativePath: string): string {
   return abs;
 }
 
+/**
+ * Refuse a ref this adapter cannot honour.
+ *
+ * A filesystem adapter reads a working tree, and a working tree is whatever is
+ * checked out — so there is no version of `readFile(…, 'main')` this can answer
+ * correctly. Until now it answered anyway: `void ref`, four times, and the
+ * caller got the working tree with no indication it had asked an unanswerable
+ * question.
+ *
+ * That is not a small imprecision. A consumer grepped at `main` for a string it
+ * knew was in that commit, got nothing back, and concluded the string was
+ * absent — a discriminating check, run correctly, returning a confident wrong
+ * answer in the verbs used for VERIFICATION. Silence is the whole defect: an
+ * error here costs a caller one message, and being wrong costs it the
+ * conclusion it drew.
+ *
+ * An EMPTY ref is not a request. Callers pass `''` as "whatever is current" so
+ * that reads, greps and symbol lookups agree on one cache key, and for a
+ * working tree that is exactly right.
+ */
+function refuseRef(ref: string | undefined, verb: string): void {
+  if (ref === undefined || ref === '') return;
+  throw new SourceApiError(
+    `${verb}: cannot read at ref ${JSON.stringify(ref)} — this is a working tree on disk, not a ` +
+      'git object database. Reading it at a ref would silently answer about whatever is checked ' +
+      'out. Omit the ref, check the ref out first, or address the repository by its remote URL.'
+  );
+}
+
 export async function readFile(
   env: SourceEnv,
   root: string,
@@ -83,7 +112,7 @@ export async function readFile(
   ref?: string
 ): Promise<ReadFileResult> {
   void env;
-  void ref;
+  refuseRef(ref, 'readFile');
   try {
     const safe = ensureSafePath(root, path);
     const content = await fsPromises.readFile(safe, 'utf8');
@@ -103,7 +132,7 @@ export async function listFiles(
   ref?: string
 ): Promise<DirEntry[]> {
   void env;
-  void ref;
+  refuseRef(ref, 'listFiles');
   try {
     const safe = ensureSafePath(root, prefix);
     const items = await fsPromises.readdir(safe, { withFileTypes: true });
@@ -130,7 +159,7 @@ export async function listFiles(
 
 export async function getRepoTree(env: SourceEnv, root: string, ref?: string): Promise<RepoTree> {
   void env;
-  void ref;
+  refuseRef(ref, 'getRepoTree');
   const entries: TreeEntry[] = [];
   let truncated = false;
 
@@ -192,7 +221,7 @@ export async function isFresh(
   ref?: string
 ): Promise<boolean> {
   void env;
-  void ref;
+  refuseRef(ref, 'isFresh');
   try {
     const safe = ensureSafePath(root, path);
     const content = await fsPromises.readFile(safe, 'utf8');
@@ -246,6 +275,27 @@ function assertSafeBranch(branch: string): void {
  * stage, and commit. Best-effort locally: on a git failure the written files are
  * left on disk (the error names them; see the SourceAdapter contract). A non-git
  * root just gets the writes. Throws on empty files or an unsafe branch name. */
+/**
+ * What git actually said, from whichever stream it said it on.
+ *
+ * This read `stderr ?? String(err)` and produced a message ending in a colon
+ * with nothing after it, for two compounding reasons. Git writes "nothing to
+ * commit" to STDOUT, so the field read was empty; and `??` falls back only on
+ * null/undefined, so an empty string passed through as though it were the
+ * explanation. A consumer spent a diagnosis on reflog archaeology to recover a
+ * sentence git had already written.
+ *
+ * Every stream, in order, and only a non-empty one is believed.
+ */
+function gitDetail(err: unknown): string {
+  const e = err as { stderr?: string; stdout?: string; message?: string };
+  for (const candidate of [e?.stderr, e?.stdout, e?.message, String(err)]) {
+    const text = (candidate ?? '').trim();
+    if (text.length > 0) return text;
+  }
+  return 'git failed and said nothing on any stream';
+}
+
 export async function commitFiles(
   env: SourceEnv,
   root: string,
@@ -293,10 +343,9 @@ export async function commitFiles(
     // fs commitFiles is best-effort locally (see the SourceAdapter contract):
     // the files are already on disk, so surface the git failure AND the paths
     // left written, rather than swallowing it into a false success.
-    const gitErr = err as { stderr?: string };
     throw new SourceApiError(
       `commitFiles: git staging/commit failed for ${root}@${branch} ` +
-        `(left on disk: ${writtenPaths.join(', ')}): ${gitErr?.stderr ?? String(err)}`
+        `(left on disk: ${writtenPaths.join(', ')}): ${gitDetail(err)}`
     );
   }
 }

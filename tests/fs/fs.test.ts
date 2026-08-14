@@ -199,3 +199,44 @@ describe('not-applicable operations', () => {
     expect(await getDefaultBranch(env, root)).toBe('local');
   });
 });
+
+describe('a ref this adapter cannot honour is refused, not ignored', () => {
+  it('refuses a named ref on every verb that takes one', async () => {
+    // The defect: `void ref` meant a caller asking for `main` got the working
+    // tree with no indication it had asked an unanswerable question. A consumer
+    // grepped at `main` for a string it knew was in that commit, got nothing,
+    // and concluded the string was absent.
+    await fsPromises.writeFile(join(root, 'a.txt'), 'on disk', 'utf8');
+
+    await expect(readFile(env, root, 'a.txt', 'main')).rejects.toThrow(/cannot read at ref "main"/);
+    await expect(listFiles(env, root, '', 'main')).rejects.toThrow(/cannot read at ref/);
+    await expect(getRepoTree(env, root, 'main')).rejects.toThrow(/cannot read at ref/);
+    await expect(isFresh(env, root, 'a.txt', 'sha', 'main')).rejects.toThrow(/cannot read at ref/);
+  });
+
+  it('names the verb and says what to do instead', async () => {
+    await expect(readFile(env, root, 'a.txt', 'v1.2.3')).rejects.toThrow(
+      /^readFile: cannot read at ref "v1\.2\.3"/
+    );
+    await expect(readFile(env, root, 'a.txt', 'v1.2.3')).rejects.toThrow(
+      /Omit the ref, check the ref out first, or address the repository by its remote URL/
+    );
+  });
+
+  it('lets an absent or empty ref through, because that is not a request', async () => {
+    // Callers pass '' as "whatever is current" so reads, greps and symbol
+    // lookups agree on one cache key. For a working tree that is exactly right.
+    await fsPromises.writeFile(join(root, 'b.txt'), 'current', 'utf8');
+
+    await expect(readFile(env, root, 'b.txt', '')).resolves.toMatchObject({ content: 'current' });
+    await expect(readFile(env, root, 'b.txt')).resolves.toMatchObject({ content: 'current' });
+  });
+
+  it('refuses BEFORE touching the filesystem, so a missing file is not the answer', async () => {
+    // Otherwise a ref request against a path that happens not to exist reports
+    // not_found — the caller learns the file is missing, which is not the fact.
+    await expect(readFile(env, root, 'never-existed.txt', 'main')).rejects.toThrow(
+      /cannot read at ref/
+    );
+  });
+});
