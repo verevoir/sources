@@ -1,8 +1,11 @@
 // @verevoir/sources/fs — local filesystem adapter
 //
 // Implements the SourceAdapter contract over a local directory root.
-// `repoUrl` is interpreted as an absolute filesystem path; `ref` is
-// accepted-but-ignored at v0 (FS has no branching concept here).
+// `repoUrl` is interpreted as an absolute filesystem path. A non-empty `ref` is
+// REFUSED: this reads a working tree, which is whatever is checked out, so
+// there is no version of "read this at main" it can answer — and it used to
+// answer anyway, with the working tree, silently. An empty or absent ref means
+// "current" and is the normal case. See `refuseRef`.
 //
 // Designed for the "developer running aigency locally" case (per
 // `project_notion_and_fs_sources_candidate_this_week`): point the
@@ -271,10 +274,6 @@ function assertSafeBranch(branch: string): void {
   }
 }
 
-/** Write every file, then — when the root is a git repo — check out `branch`,
- * stage, and commit. Best-effort locally: on a git failure the written files are
- * left on disk (the error names them; see the SourceAdapter contract). A non-git
- * root just gets the writes. Throws on empty files or an unsafe branch name. */
 /**
  * What git actually said, from whichever stream it said it on.
  *
@@ -305,6 +304,10 @@ export function gitDetail(err: unknown): string {
   return 'git failed and said nothing on any stream';
 }
 
+/** Write every file, then — when the root is a git repo — check out `branch`,
+ * stage, and commit. Best-effort locally: on a git failure the written files are
+ * left on disk (the error names them; see the SourceAdapter contract). A non-git
+ * root just gets the writes. Throws on empty files or an unsafe branch name. */
 export async function commitFiles(
   env: SourceEnv,
   root: string,

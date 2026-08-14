@@ -128,10 +128,12 @@ openPullRequest(env, target, head, base, title, body) → Promise<string>
 getDefaultBranch(env, repoUrl)             → Promise<string>
 ```
 
-**`ref`, and the fs adapter.** GitHub and Notion resolve a ref. The fs adapter
-reads a **working tree**, which is whatever is checked out, so it cannot: a
-**non-empty `ref` throws `SourceApiError`** rather than quietly answering about
-the checkout. An absent or empty ref means "current" and is the normal case.
+**`ref`, per adapter.** GitHub resolves a ref. The fs adapter reads a **working
+tree**, which is whatever is checked out, so it cannot: a **non-empty `ref`
+throws `SourceApiError`** rather than quietly answering about the checkout. An
+absent or empty ref means "current" and is the normal case. Notion still
+**accepts and ignores** a ref — the same silent substitution, not yet fixed
+there, and stated here rather than papered over.
 
 `isFresh` answers "is the `version` I'm holding still the live one for `(repoUrl, path, ref)`?" — the cheap freshness check cache layers (`@verevoir/context`'s `wrapWithCache`) use to validate held entries without re-fetching content. Returns `false` when the source has moved (including when the path no longer resolves).
 
