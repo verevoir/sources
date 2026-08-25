@@ -164,7 +164,20 @@ export async function getRepoTree(
   ref?: string
 ): Promise<RepoTree> {
   const { owner, repo } = coords(repoUrl);
-  const branch = ref ?? (await getDefaultBranch(env, repoUrl));
+  // TRUTHINESS, NOT NULLISH, AND THE DIFFERENCE IS NOT COSMETIC. `readFile` and
+  // `listFiles` above both treat `ref` as "omitted" when it is an empty string
+  // (`ref ? … : ''`), and callers pass `''` to mean exactly that — it is the
+  // cache key an unqualified read warms under. `??` only replaces null and
+  // undefined, so `''` survived, this asked GitHub for `/branches/` with no
+  // branch, and no tree resolved.
+  //
+  // One adapter held two conventions for one argument, and only one of them
+  // matched the caller. The failure was worse than a wrong answer: the request
+  // 404s, so a ref-less search threw `not_found` — the same word GitHub uses
+  // for a repository that does not exist. A session searching a private
+  // repository it could read perfectly well read that, concluded it had no
+  // access, and stopped looking.
+  const branch = ref || (await getDefaultBranch(env, repoUrl));
   const branchData = await ghCall<{
     commit?: { commit?: { tree?: { sha?: string } } };
   }>(env, 'GET', `/repos/${owner}/${repo}/branches/${branch}`);

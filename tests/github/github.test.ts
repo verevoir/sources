@@ -11,6 +11,7 @@ import {
   openPullRequest,
   parseGithubRepoUrl,
   commitFiles,
+  getRepoTree,
 } from '../../src/github/index.js';
 
 const env: SourceEnv = { token: 'test-token', forkOrg: 'verevoir' };
@@ -390,5 +391,75 @@ describe('commitFiles (atomic multi-file via the Git Data API)', () => {
 
     const patchCall = calls.find((c) => (c.init.method ?? '').toUpperCase() === 'PATCH')!;
     expect(JSON.parse(patchCall.init.body as string)).toEqual({ sha: 'newcommit' });
+  });
+});
+
+// getRepoTree had no coverage at all, which is how it came to hold a different
+// convention for `ref` than readFile and listFiles beside it. `readFile` treats
+// an empty string as "omitted" (`ref ? … : ''`); this resolved it with `??`,
+// which only replaces null and undefined — so `''`, the value callers pass to
+// mean "unqualified", survived and the request asked for `/branches/` with no
+// branch at all.
+//
+// The consequence was not a wrong tree. The request 404s, so every ref-less
+// search through this adapter failed with `not_found` — the same word GitHub
+// uses for a repository that does not exist. A session searching a private
+// repository it could read perfectly well read that, concluded it had no
+// access, and stopped looking.
+describe('getRepoTree resolves the ref the same way its neighbours do', () => {
+  const treeBody = {
+    tree: [{ path: 'src/a.ts', type: 'blob', size: 10, sha: 'blob1' }],
+    truncated: false,
+  };
+  const branchBody = { commit: { commit: { tree: { sha: 'tree1' } } } };
+
+  it('treats an EMPTY-STRING ref as omitted, and resolves the default branch', async () => {
+    // The regression. `''` is what a caller passes for an unqualified read —
+    // it is the cache key such a read warms under — so it must mean the same
+    // here as it does to readFile.
+    scriptFetch([
+      { status: 200, body: { default_branch: 'main' } },
+      { status: 200, body: branchBody },
+      { status: 200, body: treeBody },
+    ]);
+
+    const tree = await getRepoTree(env, 'foo/bar', '');
+
+    expect(tree.entries).toHaveLength(1);
+    expect(calls[1].url, 'it asked for a branch with no name').toBe(
+      'https://api.github.com/repos/foo/bar/branches/main'
+    );
+  });
+
+  it('treats an omitted ref the same way', async () => {
+    scriptFetch([
+      { status: 200, body: { default_branch: 'main' } },
+      { status: 200, body: branchBody },
+      { status: 200, body: treeBody },
+    ]);
+
+    await getRepoTree(env, 'foo/bar');
+
+    expect(calls[1].url).toBe('https://api.github.com/repos/foo/bar/branches/main');
+  });
+
+  it('uses an explicit ref as given, without asking for the default branch', async () => {
+    scriptFetch([
+      { status: 200, body: branchBody },
+      { status: 200, body: treeBody },
+    ]);
+
+    await getRepoTree(env, 'foo/bar', 'feature-branch');
+
+    expect(calls[0].url).toBe('https://api.github.com/repos/foo/bar/branches/feature-branch');
+  });
+
+  it('throws rather than returning an empty tree when no tree sha resolves', async () => {
+    // An empty entry list and "the branch did not resolve" are different facts,
+    // and returning the first for the second is what made this defect look like
+    // an absence of content rather than a failure to look.
+    scriptFetch([{ status: 200, body: { commit: {} } }]);
+
+    await expect(getRepoTree(env, 'foo/bar', 'main')).rejects.toBeInstanceOf(SourceApiError);
   });
 });
