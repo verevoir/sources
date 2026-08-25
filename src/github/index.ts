@@ -164,7 +164,10 @@ export async function getRepoTree(
   ref?: string
 ): Promise<RepoTree> {
   const { owner, repo } = coords(repoUrl);
-  const branch = ref ?? (await getDefaultBranch(env, repoUrl));
+  // Truthiness, not `??`: `readFile` and `listFiles` above treat an empty
+  // `ref` as omitted, and callers pass `''` to mean that. `??` would keep it,
+  // and ask GitHub for `/branches/` with no branch name.
+  const branch = ref || (await getDefaultBranch(env, repoUrl));
   const branchData = await ghCall<{
     commit?: { commit?: { tree?: { sha?: string } } };
   }>(env, 'GET', `/repos/${owner}/${repo}/branches/${branch}`);

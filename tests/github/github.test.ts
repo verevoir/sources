@@ -11,6 +11,7 @@ import {
   openPullRequest,
   parseGithubRepoUrl,
   commitFiles,
+  getRepoTree,
 } from '../../src/github/index.js';
 
 const env: SourceEnv = { token: 'test-token', forkOrg: 'verevoir' };
@@ -390,5 +391,67 @@ describe('commitFiles (atomic multi-file via the Git Data API)', () => {
 
     const patchCall = calls.find((c) => (c.init.method ?? '').toUpperCase() === 'PATCH')!;
     expect(JSON.parse(patchCall.init.body as string)).toEqual({ sha: 'newcommit' });
+  });
+});
+
+// getRepoTree had no coverage at all, which is how it came to resolve `ref`
+// differently from readFile and listFiles beside it.
+describe('getRepoTree resolves the ref the same way its neighbours do', () => {
+  const treeBody = {
+    tree: [{ path: 'src/a.ts', type: 'blob', size: 10, sha: 'blob1' }],
+    truncated: false,
+  };
+  const branchBody = { commit: { commit: { tree: { sha: 'tree1' } } } };
+
+  it('treats an EMPTY-STRING ref as omitted, and resolves the default branch', async () => {
+    // THE ONE THAT COVERS THE FIX. Reverting to `??` fails this test and only
+    // this test — the other three pass a truthy ref or none, where `||` and
+    // `??` agree. Verified by re-applying the defect and watching it go red.
+    scriptFetch([
+      { status: 200, body: { default_branch: 'main' } },
+      { status: 200, body: branchBody },
+      { status: 200, body: treeBody },
+    ]);
+
+    const tree = await getRepoTree(env, 'foo/bar', '');
+
+    expect(tree.entries).toHaveLength(1);
+    expect(calls[1].url, 'it asked for a branch with no name').toBe(
+      'https://api.github.com/repos/foo/bar/branches/main'
+    );
+  });
+
+  it('treats an omitted ref the same way', async () => {
+    scriptFetch([
+      { status: 200, body: { default_branch: 'main' } },
+      { status: 200, body: branchBody },
+      { status: 200, body: treeBody },
+    ]);
+
+    await getRepoTree(env, 'foo/bar');
+
+    expect(calls[1].url).toBe('https://api.github.com/repos/foo/bar/branches/main');
+  });
+
+  it('uses an explicit ref as given, without asking for the default branch', async () => {
+    scriptFetch([
+      { status: 200, body: branchBody },
+      { status: 200, body: treeBody },
+    ]);
+
+    await getRepoTree(env, 'foo/bar', 'feature-branch');
+
+    expect(calls[0].url).toBe('https://api.github.com/repos/foo/bar/branches/feature-branch');
+  });
+
+  it('throws rather than returning an empty tree when no tree sha resolves', async () => {
+    // NOT coverage of the ref fix — it passes a truthy ref, where `||` and `??`
+    // behave identically, so reverting the fix leaves this green. It covers
+    // pre-existing behaviour that had no test: an empty entry list and "the
+    // branch did not resolve" are different answers, and this pins that the
+    // second is raised rather than returned as the first.
+    scriptFetch([{ status: 200, body: { commit: {} } }]);
+
+    await expect(getRepoTree(env, 'foo/bar', 'main')).rejects.toBeInstanceOf(SourceApiError);
   });
 });
