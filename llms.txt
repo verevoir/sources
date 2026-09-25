@@ -18,10 +18,11 @@ Direct in-process use (below) is for: writing your own MCP server, embedding the
 
 - `@verevoir/sources` — core types, the `SourceAdapter` contract, the `SourceApiError` class, and the `envFromProcessEnv` helper (builds a GitHub env from `GITHUB_TOKEN`; returns `null` when unset). Per subpath an aggregate export (e.g. `github`) lets generic callers pass an adapter around as a single value. No source dependency.
 - `@verevoir/sources/github` — GitHub REST + Git Data adapter. Native `fetch`, no SDK dependency.
+- `@verevoir/sources/gitlab` — GitLab REST v4 adapter, native `fetch`. Serves gitlab.com plus exactly the hosts in `GITLAB_HOSTS` (comma-separated, self-hosted), HTTPS only — every routed host is sent the token, so there is no lookalike matching, and the adapter refuses an unlisted URL before any request (`isGitlabUrl(url)` exposes the check for routing). Token (`GITLAB_TOKEN` via `envFromProcessEnv({ tokenVar: 'GITLAB_TOKEN', forkOrgVar: 'GITLAB_FORK_NAMESPACE', defaultForkOrg: '' })`) sent as `Authorization: Bearer`; optional for public projects. Nested groups supported. `commitFiles` is one atomic commit (commits API); `isFresh` is a HEAD on `X-Gitlab-Blob-Id`; `openPullRequest` opens a merge request (head `<branch>` or `<fork project path>:<branch>`; a 409 resolves to the open MR from the same source project + branch); `ensureFork` forks into `env.forkOrg` (or the token owner's namespace), adopts an existing fork only if it is forked from the upstream, and waits for the import.
 - `@verevoir/sources/fs` — local filesystem adapter. `repoUrl` is a directory path; no auth, no API. Reads / lists / walks (skipping `node_modules`, `.git`, `dist`, etc.) / writes; `writeFile` ignores the `branch` + `message` args (the customer manages their own git). `ensureFork` and `openPullRequest` throw 501 (not applicable).
 - `@verevoir/sources/notion` — Notion adapter via `@notionhq/client` (optional peer dep). `sourceUrl` is a Notion page URL or raw page ID; that page is the root, `path` traverses child pages by title or kebab-slug. Ships a minimal Markdown↔blocks converter. `ensureBranch` no-op, `ensureFork`/`openPullRequest` throw 501.
 
-Future: `@verevoir/sources/gitlab`, `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`.
+Future: `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`.
 
 ## Install
 
@@ -72,7 +73,7 @@ readFile(env, repoUrl, path, ref?) → Promise<{ content, sha }>
 listFiles(env, repoUrl, prefix, ref?) → Promise<DirEntry[]>
 getRepoTree(env, repoUrl, ref?) → Promise<RepoTree>
 isFresh(env, repoUrl, path, version, ref?) → Promise<boolean>  // cheap "is held version still current?" check used by cache layers
-// ref: honoured by GITHUB only. FS reads a working tree and cannot resolve one, so a NON-EMPTY ref now throws SourceApiError rather than silently answering about whatever is checked out ('' and absent mean "current"). NOTION still accepts-and-ignores it — the same silent-substitution defect, not yet fixed there.
+// ref: honoured by GITHUB and GITLAB (GitLab requires one: absent or '' resolves to the default branch). FS reads a working tree and cannot resolve one, so a NON-EMPTY ref now throws SourceApiError rather than silently answering about whatever is checked out ('' and absent mean "current"). NOTION still accepts-and-ignores it — the same silent-substitution defect, not yet fixed there.
 writeFile(env, repoUrl, path, content, branch, message) → Promise<void>
 commitFiles(env, repoUrl, branch, files[], message) → Promise<void>  // multi-file commit — atomic on GitHub (Git Data API); best-effort on fs (writes then commits when the root is a git repo); Notion degrades to sequential writes
 ensureBranch(env, repoUrl, branch) → Promise<void>
