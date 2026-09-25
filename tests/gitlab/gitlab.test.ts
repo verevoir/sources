@@ -106,6 +106,18 @@ describe('parseGitlabProjectUrl', () => {
     });
   });
 
+  it('normalises www.gitlab.com to the gitlab.com API', () => {
+    expect(parseGitlabProjectUrl('https://www.gitlab.com/g/r').apiBase).toBe(
+      'https://gitlab.com/api/v4'
+    );
+  });
+
+  it('rejects a string that is not a URL at all, as a SourceApiError', () => {
+    expect(() => parseGitlabProjectUrl('gitlab.com/group/repo')).toThrow(
+      /Cannot parse GitLab project URL: gitlab\.com\/group\/repo/
+    );
+  });
+
   it('rejects a URL without a namespace/project path', () => {
     expect(() => parseGitlabProjectUrl('https://gitlab.com/onlygroup')).toThrow(/namespace/);
   });
@@ -238,6 +250,23 @@ describe('gitlab adapter — reads', () => {
     });
     expect(calls[0].url).toContain('recursive=true');
     expect(calls[0].url).toContain('pagination=keyset');
+  });
+
+  it('stops paging when a Link header carries no rel="next" (the last page)', async () => {
+    const prev = `https://gitlab.com/api/v4/projects/${ID}/repository/tree?page_token=back`;
+    const calls = stubFetch([
+      [
+        `GET /projects/${ID}/repository/tree`,
+        () => [
+          200,
+          [{ id: 'x', name: 'f', type: 'blob', path: 'f', mode: '100644' }],
+          { link: `<${prev}>; rel="prev", <${prev}>; rel="first"` },
+        ],
+      ],
+    ]);
+    const tree = await gitlab.getRepoTree(env, REPO, 'main');
+    expect(tree.truncated).toBe(false);
+    expect(calls).toHaveLength(1);
   });
 
   it('getRepoTree stops truncated at the page cap rather than paging forever', async () => {
@@ -391,6 +420,19 @@ describe('gitlab adapter — timeouts', () => {
     );
   });
 
+  it('propagates a non-timeout network failure unchanged (not dressed up as a timeout)', async () => {
+    const refused = Object.assign(new TypeError('fetch failed'), {
+      cause: { code: 'ECONNREFUSED' },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw refused;
+      })
+    );
+    await expect(gitlab.readFile(env, REPO, 'a', 'main')).rejects.toBe(refused);
+  });
+
   it('bounds each request with an abort signal', async () => {
     const calls: RequestInit[] = [];
     vi.stubGlobal(
@@ -443,6 +485,26 @@ describe('gitlab adapter — rate limiting', () => {
     await vi.advanceTimersByTimeAsync(1500);
     expect(calls).toHaveLength(1);
     await expect(settle(p)).resolves.toMatchObject({ content: 'ok' });
+  });
+
+  it('falls back to backoff when Retry-After is unparseable', async () => {
+    let n = 0;
+    const calls = stubFetch([
+      [
+        `GET /projects/${ID}/repository/files/a`,
+        () =>
+          ++n === 1
+            ? [429, {}, { 'retry-after': 'soon-ish' }]
+            : [200, { content: 'ok', blob_id: 'b' }],
+      ],
+    ]);
+    vi.useFakeTimers();
+    const p = gitlab.readFile(env, REPO, 'a', 'main');
+    // First backoff step is 1s (+ jitter): not yet at 900ms…
+    await vi.advanceTimersByTimeAsync(900);
+    expect(calls).toHaveLength(1);
+    await expect(settle(p)).resolves.toMatchObject({ content: 'ok' });
+    expect(calls).toHaveLength(2);
   });
 
   it('gives up with the 429 once retries are exhausted', async () => {
@@ -550,6 +612,18 @@ describe('gitlab adapter — writes', () => {
     expect(post.url).toContain('ref=main');
   });
 
+  it('ensureBranch surfaces a non-404 failure instead of trying to create the branch', async () => {
+    // A 403 on the lookup is not "absent": creating over it would mask the refusal.
+    const calls = stubFetch([[`GET /projects/${ID}/repository/branches/`, () => [403, {}]]]);
+    await expect(gitlab.ensureBranch(env, REPO, 'feat')).rejects.toThrow(/403/);
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(0);
+  });
+
+  it('getDefaultBranch assumes main when GitLab reports none (an empty project)', async () => {
+    stubFetch([[`GET /projects/${ID}`, () => [200, {}]]]);
+    await expect(gitlab.getDefaultBranch(env, REPO)).resolves.toBe('main');
+  });
+
   it('ensureBranch is a no-op when the branch exists', async () => {
     const calls = stubFetch([[`GET /projects/${ID}/repository/branches/`, () => [200, {}]]]);
     await gitlab.ensureBranch(env, REPO, 'feat');
@@ -650,6 +724,17 @@ describe('gitlab adapter — forks', () => {
       [`GET /projects/${ID}`, () => [200, UPSTREAM]],
     ]);
     await expect(gitlab.ensureFork(env, REPO)).resolves.toBe('https://gitlab.com/me/repo');
+  });
+
+  it('surfaces a failed fork lookup (non-404) rather than falling through to the fork list', async () => {
+    const calls = stubFetch([
+      [`POST /projects/${ID}/fork`, () => [409, {}]],
+      [`GET /user`, () => [200, { username: 'me' }]],
+      [`GET /projects/${ME_REPO}`, () => [500, {}]],
+      [`GET /projects/${ID}`, () => [200, UPSTREAM]],
+    ]);
+    await expect(gitlab.ensureFork(env, REPO)).rejects.toThrow(/500/);
+    expect(calls.some((c) => c.url.includes('/forks'))).toBe(false);
   });
 
   it('surfaces a 400 that is not "already taken" (e.g. forking disabled) unchanged', async () => {

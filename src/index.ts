@@ -110,7 +110,8 @@ export interface SourceAdapter {
    * rather than N separate writeFile commits. Atomicity is backend-specific:
    * GitHub is atomic — one Git Data API commit whose ref moves only after
    * every blob/tree/commit step succeeds, so a failure leaves no partial
-   * state. fs is best-effort locally — it writes the files, then (when the
+   * state. GitLab is atomic too — one commits-API call that applies every
+   * file action or none. fs is best-effort locally — it writes the files, then (when the
    * root is a git repo) stages + commits; a git failure throws but the
    * already-written files are NOT rolled back, so on error the caller should
    * inspect the working tree. Notion degrades to sequential writeFile. Empty
@@ -136,10 +137,14 @@ export interface SourceAdapter {
 }
 
 /** Build a `SourceEnv` from process environment variables.
- * Returns null when `GITHUB_TOKEN` is unset — callers handle that
- * explicitly. Naming intentionally references GitHub-shaped env vars
- * for back-compat; non-GitHub adapters expect callers to construct
- * the env themselves. */
+ * Returns null when the token variable is unset — callers handle that
+ * explicitly. The defaults are GitHub-shaped (`GITHUB_TOKEN`,
+ * `SOURCE_FORK_ORG`, fork org `verevoir`) for back-compat; other
+ * token-based adapters pass their own names, e.g. GitLab:
+ * `envFromProcessEnv({ tokenVar: 'GITLAB_TOKEN', forkOrgVar:
+ * 'GITLAB_FORK_NAMESPACE', defaultForkOrg: '' })`. Adapters without a
+ * token (fs) or with an SDK-specific one (Notion) construct the env
+ * themselves. */
 export function envFromProcessEnv(
   options: { tokenVar?: string; forkOrgVar?: string; defaultForkOrg?: string } = {}
 ): SourceEnv | null {
