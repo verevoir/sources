@@ -59,6 +59,7 @@ const ID = encodeURIComponent('group/sub/repo');
 const FORK_ID = encodeURIComponent('forks/team/repo');
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
@@ -256,6 +257,45 @@ describe('gitlab adapter — reads', () => {
     expect(calls).toHaveLength(500);
   });
 
+  it('getRepoTree stops truncated when its time budget runs out, before the page cap', async () => {
+    // Pages keep coming, but the clock passes the 120s budget after page one.
+    const self = `https://gitlab.com/api/v4/projects/${ID}/repository/tree?page_token=loop`;
+    const calls = stubFetch([
+      [
+        `GET /projects/${ID}/repository/tree`,
+        () => [
+          200,
+          [{ id: 'x', name: 'f', type: 'blob', path: 'f', mode: '100644' }],
+          { link: `<${self}>; rel="next"` },
+        ],
+      ],
+    ]);
+    vi.spyOn(Date, 'now')
+      .mockReturnValueOnce(0) // deadline = 0 + budget
+      .mockReturnValueOnce(0) // page 1: within budget
+      .mockReturnValue(10 ** 9); // page 2: past it
+    const tree = await gitlab.getRepoTree(env, REPO, 'main');
+    expect(tree).toEqual({ entries: [{ path: 'f', type: 'blob', sha: 'x' }], truncated: true });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('listFiles refuses a directory too large to list in one call rather than returning part of it', async () => {
+    const self = `https://gitlab.com/api/v4/projects/${ID}/repository/tree?page_token=loop`;
+    stubFetch([
+      [
+        `GET /projects/${ID}/repository/tree`,
+        () => [
+          200,
+          [{ id: 'x', name: 'f', type: 'blob', path: 'big/f', mode: '100644' }],
+          { link: `<${self}>; rel="next"` },
+        ],
+      ],
+    ]);
+    await expect(gitlab.listFiles(env, REPO, 'big', 'main')).rejects.toThrow(
+      /big has too many entries/
+    );
+  });
+
   it('listFiles maps tree/commit/symlink types', async () => {
     stubFetch([
       [
@@ -299,6 +339,12 @@ describe('gitlab adapter — reads', () => {
   it('isFresh is false when the path no longer resolves', async () => {
     stubFetch([]);
     expect(await gitlab.isFresh(env, REPO, 'gone', 'v1', 'main')).toBe(false);
+  });
+
+  it('isFresh surfaces a non-404 failure rather than reading it as "moved"', async () => {
+    // Only a 404 means the path is gone; a 500 is an error, not a stale answer.
+    stubFetch([[`HEAD /projects/${ID}/repository/files/a`, () => [500, undefined]]]);
+    await expect(gitlab.isFresh(env, REPO, 'a', 'v1', 'main')).rejects.toThrow(/500/);
   });
 });
 
@@ -444,6 +490,19 @@ describe('gitlab adapter — writes', () => {
     });
   });
 
+  it('commitFiles aborts, committing nothing, when an existence probe fails with a non-404', async () => {
+    // A failed probe must not be read as "absent" and turn an update into a create.
+    const calls = stubFetch([
+      [`GET /projects/${ID}/repository/branches/feat`, () => [200, {}]],
+      [`HEAD /projects/${ID}/repository/files/a`, () => [503, undefined]],
+      [`POST /projects/${ID}/repository/commits`, () => [201, {}]],
+    ]);
+    await expect(
+      gitlab.commitFiles(env, REPO, 'feat', [{ path: 'a', content: 'x' }], 'm')
+    ).rejects.toThrow(/503/);
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(0);
+  });
+
   it('commitFiles bounds its concurrent existence probes', async () => {
     let inFlight = 0;
     let peak = 0;
@@ -572,6 +631,27 @@ describe('gitlab adapter — forks', () => {
     await expect(gitlab.ensureFork(env, REPO)).rejects.toThrow(/409/);
   });
 
+  it('treats a 400 "has already been taken" like a 409 and adopts the existing fork', async () => {
+    // GitLab answers a claimed fork path with 400 + a validation message on some
+    // versions, 409 on others; both mean "look for the fork that is there".
+    stubFetch([
+      [
+        `POST /projects/${ID}/fork`,
+        () => [
+          400,
+          { message: { name: ['has already been taken'], path: ['has already been taken'] } },
+        ],
+      ],
+      [`GET /user`, () => [200, { username: 'me' }]],
+      [
+        `GET /projects/${ME_REPO}`,
+        () => [200, forkOf('me', { import_status: 'finished', forked_from_project: { id: 1 } })],
+      ],
+      [`GET /projects/${ID}`, () => [200, UPSTREAM]],
+    ]);
+    await expect(gitlab.ensureFork(env, REPO)).resolves.toBe('https://gitlab.com/me/repo');
+  });
+
   it('surfaces a 400 that is not "already taken" (e.g. forking disabled) unchanged', async () => {
     const calls = stubFetch([
       [`POST /projects/${ID}/fork`, () => [400, { message: 'Forking is disabled' }]],
@@ -615,6 +695,35 @@ describe('gitlab adapter — merge requests', () => {
       title: 'T',
       description: 'B',
     });
+  });
+
+  it('opens a same-project MR when head is a bare branch', async () => {
+    const calls = stubFetch([
+      [`GET /projects/${ID}`, () => [200, { id: 42 }]],
+      [
+        `POST /projects/${ID}/merge_requests`,
+        () => [201, { web_url: 'https://gitlab.com/group/sub/repo/-/merge_requests/4' }],
+      ],
+    ]);
+    await expect(gitlab.openPullRequest(env, REPO, 'feat', 'main', 'T', 'B')).resolves.toBe(
+      'https://gitlab.com/group/sub/repo/-/merge_requests/4'
+    );
+    // Created on the target itself — no fork path, no second project lookup.
+    expect(calls.map((c) => `${c.method} ${new URL(c.url).pathname}`)).toEqual([
+      `GET /api/v4/projects/${ID}`,
+      `POST /api/v4/projects/${ID}/merge_requests`,
+    ]);
+    expect(calls[1].body).toMatchObject({ source_branch: 'feat', target_project_id: 42 });
+  });
+
+  it('fails loudly when GitLab reports success but returns no MR URL', async () => {
+    stubFetch([
+      [`GET /projects/${ID}`, () => [200, { id: 42 }]],
+      [`POST /projects/${ID}/merge_requests`, () => [201, { iid: 4 }]],
+    ]);
+    await expect(gitlab.openPullRequest(env, REPO, 'feat', 'main', 'T', 'B')).rejects.toThrow(
+      /missing web_url/
+    );
   });
 
   it('returns the already-open MR on 409 for a same-project MR', async () => {
