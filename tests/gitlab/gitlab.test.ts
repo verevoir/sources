@@ -231,6 +231,22 @@ describe('gitlab adapter — reads', () => {
     expect(lookups()).toHaveLength(2);
   });
 
+  it('names GITLAB_TOKEN on an anonymous 401 or 403 too, not only the 404 private projects get', async () => {
+    for (const status of [401, 403]) {
+      stubFetch([[`GET /projects/${ID}/repository/files/`, () => [status, {}]]]);
+      await expect(gitlab.readFile({ token: '', forkOrg: '' }, REPO, 'x', 'main')).rejects.toThrow(
+        new RegExp(`${status} \\(no GITLAB_TOKEN set`)
+      );
+    }
+  });
+
+  it('does not add the hint to a 401 when a token WAS sent (it is the wrong token, not a missing one)', async () => {
+    stubFetch([[`GET /projects/${ID}/repository/files/`, () => [401, {}]]]);
+    const err = await gitlab.readFile(env, REPO, 'x', 'main').catch((e: Error) => e);
+    expect(String(err)).toMatch(/401/);
+    expect(String(err)).not.toMatch(/GITLAB_TOKEN/);
+  });
+
   it('names GITLAB_TOKEN when an anonymous request is refused', async () => {
     stubFetch([]);
     await expect(gitlab.readFile({ token: '', forkOrg: '' }, REPO, 'x', 'main')).rejects.toThrow(
@@ -529,6 +545,25 @@ describe('gitlab adapter — rate limiting', () => {
     expect(calls).toHaveLength(2);
   });
 
+  it('backs off on a negative Retry-After instead of retrying at once', async () => {
+    // Date.parse('-5') is a date in 2001: read as an HTTP-date, this would
+    // compute a zero wait and retry immediately — a hammering loop.
+    let n = 0;
+    const calls = stubFetch([
+      [
+        `GET /projects/${ID}/repository/files/a`,
+        () =>
+          ++n === 1 ? [429, {}, { 'retry-after': '-5' }] : [200, { content: 'ok', blob_id: 'b' }],
+      ],
+    ]);
+    vi.useFakeTimers();
+    const p = gitlab.readFile(env, REPO, 'a', 'main');
+    await vi.advanceTimersByTimeAsync(900);
+    expect(calls).toHaveLength(1);
+    await expect(settle(p)).resolves.toMatchObject({ content: 'ok' });
+    expect(calls).toHaveLength(2);
+  });
+
   it('gives up with the 429 once retries are exhausted', async () => {
     const calls = stubFetch([[`GET /projects/${ID}/repository/files/a`, () => [429, {}]]]);
     vi.useFakeTimers();
@@ -644,6 +679,16 @@ describe('gitlab adapter — writes', () => {
   it('getDefaultBranch assumes main when GitLab reports none (an empty project)', async () => {
     stubFetch([[`GET /projects/${ID}`, () => [200, {}]]]);
     await expect(gitlab.getDefaultBranch(env, REPO)).resolves.toBe('main');
+  });
+
+  it('accepts a 204 No Content success without trying to parse a body', async () => {
+    // e.g. a proxy or GitLab version answering the branch create with 204.
+    stubFetch([
+      [`GET /projects/${ID}/repository/branches/`, () => [404, {}]],
+      [`GET /projects/${ID}`, () => [200, { default_branch: 'main' }]],
+      [`POST /projects/${ID}/repository/branches`, () => [204, undefined]],
+    ]);
+    await expect(gitlab.ensureBranch(env, REPO, 'feat')).resolves.toBeUndefined();
   });
 
   it('ensureBranch is a no-op when the branch exists', async () => {

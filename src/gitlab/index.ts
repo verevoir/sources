@@ -117,10 +117,16 @@ function retryDelay(res: Response, attempt: number): number {
   const header = res.headers.get('retry-after');
   let wait = 2 ** attempt * 1000;
   if (header) {
-    const secs = Number(header);
-    const date = Date.parse(header);
-    if (Number.isFinite(secs) && secs >= 0) wait = secs * 1000;
-    else if (!Number.isNaN(date)) wait = Math.max(0, date - Date.now());
+    // A numeric value is delay-seconds; a negative one is invalid and falls
+    // back to backoff. Only a non-numeric value is an HTTP-date — Date.parse
+    // would otherwise read "-5" as the year 2001 and retry at once.
+    if (/^\s*-?\d+(\.\d+)?\s*$/.test(header)) {
+      const secs = Number(header);
+      if (secs >= 0) wait = secs * 1000;
+    } else {
+      const date = Date.parse(header);
+      if (!Number.isNaN(date)) wait = Math.max(0, date - Date.now());
+    }
   }
   return Math.min(wait + Math.random() * 250, RATE_LIMIT_MAX_WAIT_MS);
 }
