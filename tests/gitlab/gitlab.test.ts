@@ -209,6 +209,28 @@ describe('gitlab adapter — reads', () => {
     expect(calls[0].url).toMatch(/^https:\/\/code\.example\.com\/api\/v4\//);
   });
 
+  it('re-fetches the default branch once the one-minute memo has expired, not before', async () => {
+    let branch = 'trunk';
+    const calls = stubFetch([
+      [`GET /projects/${ID}/repository/files/`, () => [200, { content: '', blob_id: 'b' }]],
+      [`GET /projects/${ID}`, () => [200, { default_branch: branch }]],
+    ]);
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const lookups = () => calls.filter((c) => /\/projects\/[^/]+$/.test(new URL(c.url).pathname));
+    await gitlab.readFile(env, REPO, 'x');
+    branch = 'main'; // renamed upstream
+    now.mockReturnValue(1_000_000 + 59_999); // just inside the minute: remembered
+    await gitlab.readFile(env, REPO, 'x');
+    expect(lookups()).toHaveLength(1);
+    now.mockReturnValue(1_000_000 + 60_000); // the minute is up: asked again
+    await gitlab.readFile(env, REPO, 'x');
+    expect(lookups()).toHaveLength(2);
+    expect(calls.at(-1)!.url).toContain('ref=main');
+    now.mockReturnValue(1_000_000 + 60_001); // …and the fresh answer is remembered anew
+    await gitlab.readFile(env, REPO, 'x');
+    expect(lookups()).toHaveLength(2);
+  });
+
   it('names GITLAB_TOKEN when an anonymous request is refused', async () => {
     stubFetch([]);
     await expect(gitlab.readFile({ token: '', forkOrg: '' }, REPO, 'x', 'main')).rejects.toThrow(
