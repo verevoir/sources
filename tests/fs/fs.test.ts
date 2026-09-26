@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { promises as fsPromises } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   readFile,
   listFiles,
@@ -17,6 +19,7 @@ import {
 import { SourceApiError, type SourceEnv } from '../../src/index.js';
 
 const env: SourceEnv = { token: '', forkOrg: '' };
+const execFileAsync = promisify(execFile);
 
 let root: string;
 
@@ -118,6 +121,71 @@ describe('getRepoTree', () => {
     expect(paths).toContain('app.ts');
     expect(paths.some((p) => p.startsWith('node_modules'))).toBe(false);
     expect(paths.some((p) => p.startsWith('.git'))).toBe(false);
+  });
+
+  describe('honours git ignore rules', () => {
+    const git = (cwd: string, ...args: string[]) => execFileAsync('git', args, { cwd });
+
+    it('prunes gitignored directories and files', async () => {
+      await git(root, 'init', '-q');
+      await fsPromises.writeFile(
+        join(root, '.gitignore'),
+        '/.dev/pg-data/\n*.log\n.env.mcp\n!keep.log\n',
+        'utf8'
+      );
+      await fsPromises.mkdir(join(root, '.dev', 'pg-data', 'base'), { recursive: true });
+      await fsPromises.writeFile(join(root, '.dev', 'pg-data', 'base', '1'), 'x', 'utf8');
+      await fsPromises.writeFile(join(root, '.dev', 'init.sh'), '#', 'utf8');
+      await fsPromises.writeFile(join(root, 'debug.log'), 'x', 'utf8');
+      await fsPromises.writeFile(join(root, '.env.mcp'), 'test-only', 'utf8');
+      await fsPromises.writeFile(join(root, 'keep.log'), 'keep', 'utf8');
+      await fsPromises.writeFile(join(root, 'app.ts'), 'a', 'utf8');
+
+      const paths = (await getRepoTree(env, root)).entries.map((e) => e.path).sort();
+      expect(paths).toEqual(['.dev', '.dev/init.sh', '.gitignore', 'app.ts', 'keep.log']);
+    });
+
+    it('does not let an ignored directory exhaust the tree cap', async () => {
+      await git(root, 'init', '-q');
+      await fsPromises.writeFile(join(root, '.gitignore'), '/aaa-ignored/\n', 'utf8');
+      await fsPromises.mkdir(join(root, 'aaa-ignored'));
+      await Promise.all(
+        Array.from({ length: 5001 }, (_, i) =>
+          fsPromises.writeFile(join(root, 'aaa-ignored', `f${i}`), '', 'utf8')
+        )
+      );
+      await fsPromises.writeFile(join(root, 'zzz.ts'), 'z', 'utf8');
+
+      const tree = await getRepoTree(env, root);
+      expect(tree.truncated).toBe(false);
+      expect(tree.entries.map((e) => e.path)).toContain('zzz.ts');
+    });
+
+    it("applies a nested work tree's own ignore rules (submodule-style)", async () => {
+      await git(root, 'init', '-q');
+      await fsPromises.mkdir(join(root, 'sub', 'out'), { recursive: true });
+      await git(
+        join(root, 'sub'),
+        'init',
+        '-q',
+        '--separate-git-dir',
+        join(root, '.git', 'nested')
+      );
+      await fsPromises.writeFile(join(root, 'sub', '.gitignore'), 'out/\n', 'utf8');
+      await fsPromises.writeFile(join(root, 'sub', 'out', 'bundle.js'), 'b', 'utf8');
+      await fsPromises.writeFile(join(root, 'sub', 'index.ts'), 'i', 'utf8');
+
+      const paths = (await getRepoTree(env, root)).entries.map((e) => e.path).sort();
+      expect(paths).toEqual(['sub', 'sub/.gitignore', 'sub/index.ts']);
+    });
+
+    it('walks everything outside a git work tree', async () => {
+      await fsPromises.writeFile(join(root, '.gitignore'), '*.log\n', 'utf8');
+      await fsPromises.writeFile(join(root, 'debug.log'), 'x', 'utf8');
+
+      const paths = (await getRepoTree(env, root)).entries.map((e) => e.path).sort();
+      expect(paths).toEqual(['.gitignore', 'debug.log']);
+    });
   });
 });
 
