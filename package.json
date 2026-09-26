@@ -52,7 +52,7 @@
     "@types/node": "^25.8.0",
     "prettier": "^3",
     "typescript": "^5",
-    "vitest": "^4"
+    "vitest": "^4.1.11"
   },
   "publishConfig": {
     "access": "public"
