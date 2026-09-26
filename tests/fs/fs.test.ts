@@ -77,6 +77,53 @@ describe('listFiles', () => {
     expect(inSrc[0].path).toBe('src/index.ts');
   });
 
+  it('hides ignored secrets, directories, and direct ignored prefixes', async () => {
+    await execFileAsync('git', ['init', '-q'], { cwd: root });
+    await fsPromises.writeFile(join(root, '.gitignore'), '.env.mcp\nprivate/\n');
+    await fsPromises.writeFile(join(root, '.env.mcp'), 'test-only');
+    await fsPromises.mkdir(join(root, 'private'));
+    await fsPromises.writeFile(join(root, 'private', 'secret'), 'test-only');
+    await fsPromises.mkdir(join(root, 'node_modules'));
+    await fsPromises.writeFile(join(root, 'app.ts'), '');
+    expect((await listFiles(env, root, '')).map((e) => e.path).sort()).toEqual([
+      '.gitignore',
+      'app.ts',
+    ]);
+    expect(await listFiles(env, root, 'private')).toEqual([]);
+    expect(await listFiles(env, root, 'private/../private')).toEqual([]);
+    expect(await listFiles(env, root, 'node_modules')).toEqual([]);
+  });
+
+  it('uses nested worktree rules and preserves tracked files and ignore negation', async () => {
+    await execFileAsync('git', ['init', '-q'], { cwd: root });
+    const sub = join(root, 'sub');
+    await fsPromises.mkdir(sub);
+    await execFileAsync('git', ['init', '-q', '--separate-git-dir', join(root, '.git', 'nested')], {
+      cwd: sub,
+    });
+    await fsPromises.writeFile(join(sub, 'tracked.log'), '');
+    await execFileAsync('git', ['add', 'tracked.log'], { cwd: sub });
+    await fsPromises.writeFile(join(sub, '.gitignore'), '*.log\n!keep.log\n');
+    await fsPromises.writeFile(join(sub, 'hidden.log'), '');
+    await fsPromises.writeFile(join(sub, 'keep.log'), '');
+    expect((await listFiles(env, root, 'sub')).map((e) => e.path).sort()).toEqual([
+      'sub/.gitignore',
+      'sub/keep.log',
+      'sub/tracked.log',
+    ]);
+  });
+
+  it('keeps non-Git listings available while skipping built-in directories', async () => {
+    await fsPromises.writeFile(join(root, '.gitignore'), '*.log\n');
+    await fsPromises.writeFile(join(root, 'visible.log'), '');
+    await fsPromises.mkdir(join(root, 'node_modules'));
+    expect((await listFiles(env, root, '')).map((e) => e.name).sort()).toEqual([
+      '.gitignore',
+      'visible.log',
+    ]);
+    await expect(listFiles(env, root, '../escape')).rejects.toThrow('Path escapes');
+  });
+
   it('throws SourceApiError with status=404 on missing prefix', async () => {
     try {
       await listFiles(env, root, 'nope');

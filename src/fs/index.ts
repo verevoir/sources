@@ -28,7 +28,7 @@
 //     don't have a local-FS equivalent.
 
 import { promises as fsPromises } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -144,19 +144,39 @@ export async function listFiles(
   try {
     const safe = ensureSafePath(root, prefix);
     const items = await fsPromises.readdir(safe, { withFileTypes: true });
-    return items.map((item) => ({
-      name: item.name,
-      type: item.isDirectory()
-        ? ('dir' as const)
-        : item.isSymbolicLink()
-          ? ('symlink' as const)
-          : ('file' as const),
-      path: prefix ? `${prefix}/${item.name}` : item.name,
-      // FS entries don't have a meaningful per-entry sha at the
-      // listing level; downstream callers that need one use
-      // `readFile` to get the content sha.
-      sha: '',
-    }));
+    const ignored = await gitIgnoredPaths(root);
+    let scope: IgnoreScope | null = ignored ? { base: '', ignored } : null;
+    let rel = '';
+    // Check every ancestor before entering a nested repository; otherwise a
+    // direct prefix could expose a subtree that the tree walk prunes.
+    for (const part of relative(resolve(root), safe).split('/').filter(Boolean)) {
+      rel = rel ? `${rel}/${part}` : part;
+      if (IGNORED_DIRS.has(part) || isGitIgnored(scope, rel, true)) return [];
+      try {
+        await fsPromises.lstat(join(root, rel, '.git'));
+      } catch {
+        continue;
+      }
+      const nested = await gitIgnoredPaths(join(root, rel));
+      if (nested) scope = { base: rel, ignored: nested };
+    }
+    return items
+      .filter(
+        (item) =>
+          !IGNORED_DIRS.has(item.name) &&
+          !isGitIgnored(scope, rel ? `${rel}/${item.name}` : item.name, item.isDirectory())
+      )
+      .map((item) => ({
+        name: item.name,
+        type: item.isDirectory()
+          ? ('dir' as const)
+          : item.isSymbolicLink()
+            ? ('symlink' as const)
+            : ('file' as const),
+        path: prefix ? `${prefix}/${item.name}` : item.name,
+        // Listing entries have no content hash; callers can use readFile.
+        sha: '',
+      }));
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
       throw new SourceApiError('not_found', 404);
