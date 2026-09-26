@@ -90,6 +90,7 @@ describe('listFiles', () => {
       'app.ts',
     ]);
     expect(await listFiles(env, root, 'private')).toEqual([]);
+    expect(await listFiles(env, join(root, 'private'), '')).toEqual([]);
     expect(await listFiles(env, root, 'private/../private')).toEqual([]);
     expect(await listFiles(env, root, 'node_modules')).toEqual([]);
   });

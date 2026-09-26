@@ -18,8 +18,8 @@
 // `envFromProcessEnv` returns a valid one even with no GITHUB_TOKEN
 // when this adapter is the target.
 //
-// Tree walks respect Git ignore rules. `writeFile` writes straight to disk
-// (no commit, no branch), while `commitFiles` stages +
+// Tree walks and listings respect Git ignore rules. `writeFile` writes
+// straight to disk (no commit, no branch), while `commitFiles` stages +
 // commits on the branch when the root is a git repo (best-effort — the
 // files are written first and are not rolled back if the commit fails).
 //
