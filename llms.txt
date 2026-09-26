@@ -18,7 +18,7 @@ Direct in-process use (below) is for: writing your own MCP server, embedding the
 
 - `@verevoir/sources` — core types, the `SourceAdapter` contract, the `SourceApiError` class, and the `envFromProcessEnv` helper (builds a GitHub env from `GITHUB_TOKEN`; returns `null` when unset). Per subpath an aggregate export (e.g. `github`) lets generic callers pass an adapter around as a single value. No source dependency.
 - `@verevoir/sources/github` — GitHub REST + Git Data adapter. Native `fetch`, no SDK dependency.
-- `@verevoir/sources/fs` — local filesystem adapter. `repoUrl` is a directory path; no auth, no API. Reads / lists / walks (skipping `node_modules`, `.git`, `dist`, etc. and Git-ignored paths, including inside nested worktrees) / writes; `writeFile` ignores the `branch` + `message` args (the customer manages their own git). `ensureFork` and `openPullRequest` throw 501 (not applicable).
+- `@verevoir/sources/fs` — local filesystem adapter. `repoUrl` is a directory path; no auth, no API. Reads / lists and walks (skipping `node_modules`, `.git`, `dist`, etc. and Git-ignored paths, including inside nested worktrees) / writes; `writeFile` ignores the `branch` + `message` args (the customer manages their own git). `ensureFork` and `openPullRequest` throw 501 (not applicable).
 - `@verevoir/sources/notion` — Notion adapter via `@notionhq/client` (optional peer dep). `sourceUrl` is a Notion page URL or raw page ID; that page is the root, `path` traverses child pages by title or kebab-slug. Ships a minimal Markdown↔blocks converter. `ensureBranch` no-op, `ensureFork`/`openPullRequest` throw 501.
 
 Future: `@verevoir/sources/gitlab`, `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`.
