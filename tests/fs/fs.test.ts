@@ -123,6 +123,36 @@ describe('getRepoTree', () => {
     expect(paths.some((p) => p.startsWith('.git'))).toBe(false);
   });
 
+  it('returns more than the old 5,000-entry default cap', async () => {
+    await Promise.all(
+      Array.from({ length: 5001 }, (_, i) => fsPromises.writeFile(join(root, `file-${i}`), ''))
+    );
+    const tree = await getRepoTree(env, root);
+    expect(tree.entries).toHaveLength(5001);
+    expect(tree.truncated).toBe(false);
+  });
+
+  it('limits entries with an explicit cap and reports only actual omissions', async () => {
+    await fsPromises.mkdir(join(root, 'dir'));
+    await fsPromises.writeFile(join(root, 'dir', 'a'), '');
+    await fsPromises.mkdir(join(root, 'node_modules'));
+    const limited = await getRepoTree(env, root, undefined, { maxEntries: 1 });
+    expect(limited.entries.map((e) => e.path)).toEqual(['dir']);
+    expect(limited.truncated).toBe(true);
+    const exact = await getRepoTree(env, root, undefined, { maxEntries: 2 });
+    expect(exact.entries).toHaveLength(2);
+    expect(exact.truncated).toBe(false);
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid maxEntries %s',
+    async (maxEntries) => {
+      await expect(getRepoTree(env, root, undefined, { maxEntries })).rejects.toThrow(
+        'maxEntries must be a positive safe integer'
+      );
+    }
+  );
+
   describe('honours git ignore rules', () => {
     const git = (cwd: string, ...args: string[]) => execFileAsync('git', args, { cwd });
 

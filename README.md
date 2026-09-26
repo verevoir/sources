@@ -91,6 +91,11 @@ await writeFile(
 
 `ensureFork` and `openPullRequest` throw 501 on the FS adapter — there's no local-FS equivalent. The customer manages git operations themselves.
 
+The filesystem tree walk defaults to 25,000 entries. Set a different limit with
+`fs.getRepoTree(env, root, undefined, { maxEntries: 50000 })`; `maxEntries` must
+be a positive safe integer. Check `tree.truncated` before treating the result as
+complete. The option is specific to the filesystem adapter.
+
 ## Fork-pivot pattern
 
 When a `writeFile` to an upstream repo returns 403 (no write access), the caller can fork the upstream, write to the fork, and open a PR back:
