@@ -58,7 +58,12 @@ const IGNORED_DIRS = new Set([
 
 const execFileAsync = promisify(execFile);
 
-const DEFAULT_TREE_CAP = 5000;
+const DEFAULT_TREE_CAP = 25000;
+
+export interface FsTreeOptions {
+  /** Maximum returned entries; defaults to 25,000. Must be a positive safe integer. */
+  maxEntries?: number;
+}
 
 /** Surrogate sha — sha256 prefix of the content. Lets callers that
  * use sha for change-detection (e.g. cache invalidation) behave
@@ -203,9 +208,18 @@ function isGitIgnored(scope: IgnoreScope | null, childRel: string, isDir: boolea
  * work tree (a submodule, or any directory holding a `.git` entry)
  * starts a fresh scope, since the parent's `git ls-files` does not
  * descend into it. */
-export async function getRepoTree(env: SourceEnv, root: string, ref?: string): Promise<RepoTree> {
+export async function getRepoTree(
+  env: SourceEnv,
+  root: string,
+  ref?: string,
+  options: FsTreeOptions = {}
+): Promise<RepoTree> {
   void env;
   refuseRef(ref, 'getRepoTree');
+  const cap = options.maxEntries ?? DEFAULT_TREE_CAP;
+  if (!Number.isSafeInteger(cap) || cap < 1) {
+    throw new SourceApiError('getRepoTree: maxEntries must be a positive safe integer');
+  }
   const entries: TreeEntry[] = [];
   let truncated = false;
 
@@ -215,10 +229,6 @@ export async function getRepoTree(env: SourceEnv, root: string, ref?: string): P
   }
 
   async function walk(rel: string, parentScope: IgnoreScope | null): Promise<void> {
-    if (entries.length >= DEFAULT_TREE_CAP) {
-      truncated = true;
-      return;
-    }
     const abs = rel ? join(root, rel) : root;
     let items;
     try {
@@ -231,18 +241,19 @@ export async function getRepoTree(env: SourceEnv, root: string, ref?: string): P
         ? ((await scopeFor(rel)) ?? parentScope)
         : parentScope;
     for (const item of items) {
-      if (entries.length >= DEFAULT_TREE_CAP) {
+      if (IGNORED_DIRS.has(item.name)) continue;
+      const childRel = rel ? `${rel}/${item.name}` : item.name;
+      if (!item.isDirectory() && !item.isFile()) continue;
+      if (isGitIgnored(scope, childRel, item.isDirectory())) continue;
+      if (entries.length >= cap) {
         truncated = true;
         return;
       }
-      if (IGNORED_DIRS.has(item.name)) continue;
-      const childRel = rel ? `${rel}/${item.name}` : item.name;
       if (item.isDirectory()) {
-        if (isGitIgnored(scope, childRel, true)) continue;
         entries.push({ path: childRel, type: 'tree', sha: '' });
         await walk(childRel, scope);
+        if (truncated) return;
       } else if (item.isFile()) {
-        if (isGitIgnored(scope, childRel, false)) continue;
         let size: number | undefined;
         try {
           const stat = await fsPromises.stat(join(root, childRel));
