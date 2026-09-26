@@ -277,6 +277,14 @@ describe('getRepoTree', () => {
       expect(paths).toEqual(['sub', 'sub/.gitignore', 'sub/index.ts']);
     });
 
+    it('honours ignores when the walk root is inside an ignored directory', async () => {
+      await git(root, 'init', '-q');
+      await fsPromises.writeFile(join(root, '.gitignore'), 'private/\n');
+      await fsPromises.mkdir(join(root, 'private'));
+      await fsPromises.writeFile(join(root, 'private', 'secret'), 'test-only');
+      expect((await getRepoTree(env, join(root, 'private'))).entries).toEqual([]);
+    });
+
     it('walks everything outside a git work tree', async () => {
       await fsPromises.writeFile(join(root, '.gitignore'), '*.log\n', 'utf8');
       await fsPromises.writeFile(join(root, 'debug.log'), 'x', 'utf8');
