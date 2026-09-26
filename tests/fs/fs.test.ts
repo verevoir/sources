@@ -153,6 +153,27 @@ describe('getRepoTree', () => {
     }
   );
 
+  it('keeps sibling repository ignore scopes separate and refreshes each call', async () => {
+    for (let i = 0; i < 12; i++) {
+      const sub = join(root, `repo-${i}`);
+      await fsPromises.mkdir(sub);
+      await execFileAsync('git', ['init', '-q'], { cwd: sub });
+      await fsPromises.writeFile(join(sub, '.gitignore'), i % 2 ? 'a\n' : 'b\n');
+      await fsPromises.writeFile(join(sub, 'a'), '');
+      await fsPromises.writeFile(join(sub, 'b'), '');
+    }
+    const first = await getRepoTree(env, root);
+    for (let i = 0; i < 12; i++) {
+      const paths = first.entries.map((e) => e.path);
+      expect(paths).toContain(`repo-${i}/${i % 2 ? 'b' : 'a'}`);
+      expect(paths).not.toContain(`repo-${i}/${i % 2 ? 'a' : 'b'}`);
+    }
+    await fsPromises.writeFile(join(root, 'repo-0', '.gitignore'), 'a\n');
+    const second = (await getRepoTree(env, root)).entries.map((e) => e.path);
+    expect(second).toContain('repo-0/b');
+    expect(second).not.toContain('repo-0/a');
+  });
+
   describe('honours git ignore rules', () => {
     const git = (cwd: string, ...args: string[]) => execFileAsync('git', args, { cwd });
 
