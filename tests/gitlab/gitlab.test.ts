@@ -525,6 +525,29 @@ describe('gitlab adapter — rate limiting', () => {
     await expect(settle(p)).resolves.toMatchObject({ content: 'ok' });
   });
 
+  it.each(['seconds', 'HTTP-date'])('caps a large Retry-After %s at 30 seconds', async (format) => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const retryAfter =
+      format === 'seconds' ? '99999' : new Date(Date.now() + 99_999_000).toUTCString();
+    let n = 0;
+    const calls = stubFetch([
+      [
+        `GET /projects/${ID}/repository/files/a`,
+        () =>
+          ++n === 1
+            ? [429, {}, { 'retry-after': retryAfter }]
+            : [200, { content: 'ok', blob_id: 'b' }],
+      ],
+    ]);
+    const p = gitlab.readFile(env, REPO, 'a', 'main');
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toHaveLength(2);
+    await expect(p).resolves.toEqual({ content: 'ok', sha: 'b' });
+  });
+
   it('falls back to backoff when Retry-After is unparseable', async () => {
     let n = 0;
     const calls = stubFetch([
@@ -719,6 +742,32 @@ describe('gitlab adapter — forks', () => {
   const UPSTREAM = { id: 1, path: 'repo', web_url: REPO };
   const ME_REPO = encodeURIComponent('me/repo');
 
+  it('adopts an existing fork in the configured namespace on 409 without looking up the user', async () => {
+    const calls = stubFetch([
+      [`POST /projects/${ID}/fork`, () => [409, { message: 'already exists' }]],
+      [
+        `GET /projects/${FORK_ID}`,
+        () => [
+          200,
+          forkOf('forks/team', {
+            import_status: 'finished',
+            forked_from_project: { id: 1 },
+          }),
+        ],
+      ],
+      [`GET /projects/${ID}`, () => [200, UPSTREAM]],
+    ]);
+    await expect(gitlab.ensureFork({ ...env, forkOrg: 'forks/team' }, REPO)).resolves.toBe(
+      'https://gitlab.com/forks/team/repo'
+    );
+    expect(calls[0].body).toEqual({ namespace_path: 'forks/team' });
+    expect(calls.map((c) => `${c.method} ${new URL(c.url).pathname}`)).toEqual([
+      `POST /api/v4/projects/${ID}/fork`,
+      `GET /api/v4/projects/${ID}`,
+      `GET /api/v4/projects/${FORK_ID}`,
+    ]);
+  });
+
   it('returns the existing fork on 409 at its expected path (no Owner access needed), and waits for import', async () => {
     let polls = 0;
     const calls = stubFetch([
@@ -867,6 +916,23 @@ describe('gitlab adapter — merge requests', () => {
     ]);
     expect(calls[1].body).toMatchObject({ source_branch: 'feat', target_project_id: 42 });
   });
+
+  it.each([400, 403, 500])(
+    'surfaces MR-create %i without looking up duplicate MRs',
+    async (status) => {
+      const calls = stubFetch([
+        [`GET /projects/${ID}`, () => [200, { id: 42 }]],
+        [`POST /projects/${ID}/merge_requests`, () => [status, { message: 'creation failed' }]],
+      ]);
+      await expect(
+        gitlab.openPullRequest(env, REPO, 'feat', 'main', 'T', 'B')
+      ).rejects.toMatchObject({ status, detail: expect.stringContaining('creation failed') });
+      expect(calls.map((c) => `${c.method} ${new URL(c.url).pathname}`)).toEqual([
+        `GET /api/v4/projects/${ID}`,
+        `POST /api/v4/projects/${ID}/merge_requests`,
+      ]);
+    }
+  );
 
   it('fails loudly when GitLab reports success but returns no MR URL', async () => {
     stubFetch([
