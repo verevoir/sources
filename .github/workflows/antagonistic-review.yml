@@ -261,6 +261,9 @@ jobs:
         timeout-minutes: 12 # bound the model invocation specifically, inside the job envelope
         uses: anthropics/claude-code-base-action@e8132bc5e637a42c27763fc757faa37e1ee43b34 # @beta
         env:
+          # provision returned 25,553 tokens in run 36181403663, exceeding the
+          # CLI's 25,000-token default before the lens could read its rubric.
+          MAX_MCP_OUTPUT_TOKENS: '50000'
           # the MCP (mcp.json) still uses this for the work source; the corpus no
           # longer costs a REST call at all.
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
