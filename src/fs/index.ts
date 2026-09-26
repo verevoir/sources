@@ -18,8 +18,8 @@
 // `envFromProcessEnv` returns a valid one even with no GITHUB_TOKEN
 // when this adapter is the target.
 //
-// Git-awareness is scoped to `commitFiles`: `writeFile` still writes
-// straight to disk (no commit, no branch), but `commitFiles` stages +
+// Tree walks respect Git ignore rules. `writeFile` writes straight to disk
+// (no commit, no branch), while `commitFiles` stages +
 // commits on the branch when the root is a git repo (best-effort — the
 // files are written first and are not rolled back if the commit fails).
 //
@@ -160,13 +160,62 @@ export async function listFiles(
   }
 }
 
+/** A git work tree the walk is inside: `base` is its directory relative
+ * to the walk root ('' for the root itself) and `ignored` is what git
+ * reports as ignored under it, relative to `base` (directories carry a
+ * trailing '/'). */
+interface IgnoreScope {
+  base: string;
+  ignored: Set<string>;
+}
+
+/** Ask git which paths under `dir` it ignores — nested `.gitignore`s,
+ * `.git/info/exclude` and the global excludes file, with git's own
+ * semantics rather than a reimplementation. `--directory` collapses a
+ * wholly-ignored directory to one `dir/` line, so a large ignored tree
+ * (a database bind mount, `node_modules`) costs one entry, not a walk.
+ * Returns null when `dir` is not in a work tree or git is unavailable —
+ * the walk then falls back to `IGNORED_DIRS` alone. */
+async function gitIgnoredPaths(dir: string): Promise<Set<string> | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'],
+      { cwd: dir, maxBuffer: 64 * 1024 * 1024 }
+    );
+    return new Set(stdout.split('\0').filter(Boolean));
+  } catch {
+    return null;
+  }
+}
+
+function isGitIgnored(scope: IgnoreScope | null, childRel: string, isDir: boolean): boolean {
+  if (!scope) return false;
+  if (scope.ignored.has('./')) return true;
+  const key = scope.base ? childRel.slice(scope.base.length + 1) : childRel;
+  return scope.ignored.has(isDir ? `${key}/` : key);
+}
+
+/** Walk the tree under `root`, skipping `IGNORED_DIRS` by name and
+ * anything git ignores. Ignored paths are pruned DURING the walk, so
+ * they never count toward `DEFAULT_TREE_CAP` — otherwise a gitignored
+ * directory that sorts early (e.g. `.dev/pg-data`) can exhaust the cap
+ * and silently drop real source from the tail of the tree. A nested
+ * work tree (a submodule, or any directory holding a `.git` entry)
+ * starts a fresh scope, since the parent's `git ls-files` does not
+ * descend into it. */
 export async function getRepoTree(env: SourceEnv, root: string, ref?: string): Promise<RepoTree> {
   void env;
   refuseRef(ref, 'getRepoTree');
   const entries: TreeEntry[] = [];
   let truncated = false;
 
-  async function walk(rel: string): Promise<void> {
+  async function scopeFor(rel: string): Promise<IgnoreScope | null> {
+    const ignored = await gitIgnoredPaths(rel ? join(root, rel) : root);
+    return ignored ? { base: rel, ignored } : null;
+  }
+
+  async function walk(rel: string, parentScope: IgnoreScope | null): Promise<void> {
     if (entries.length >= DEFAULT_TREE_CAP) {
       truncated = true;
       return;
@@ -178,6 +227,10 @@ export async function getRepoTree(env: SourceEnv, root: string, ref?: string): P
     } catch {
       return;
     }
+    const scope =
+      rel === '' || items.some((item) => item.name === '.git')
+        ? ((await scopeFor(rel)) ?? parentScope)
+        : parentScope;
     for (const item of items) {
       if (entries.length >= DEFAULT_TREE_CAP) {
         truncated = true;
@@ -186,9 +239,11 @@ export async function getRepoTree(env: SourceEnv, root: string, ref?: string): P
       if (IGNORED_DIRS.has(item.name)) continue;
       const childRel = rel ? `${rel}/${item.name}` : item.name;
       if (item.isDirectory()) {
+        if (isGitIgnored(scope, childRel, true)) continue;
         entries.push({ path: childRel, type: 'tree', sha: '' });
-        await walk(childRel);
+        await walk(childRel, scope);
       } else if (item.isFile()) {
+        if (isGitIgnored(scope, childRel, false)) continue;
         let size: number | undefined;
         try {
           const stat = await fsPromises.stat(join(root, childRel));
@@ -201,7 +256,7 @@ export async function getRepoTree(env: SourceEnv, root: string, ref?: string): P
     }
   }
 
-  await walk('');
+  await walk('', null);
   return { entries, truncated };
 }
 
