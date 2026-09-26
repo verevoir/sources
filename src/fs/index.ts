@@ -229,7 +229,7 @@ export async function getRepoTree(
     return ignored ? { base: rel, ignored } : null;
   }
 
-  async function walk(rel: string, parentScope: IgnoreScope | null): Promise<void> {
+  async function walk(rel: string, scope: IgnoreScope | null): Promise<void> {
     const abs = rel ? join(root, rel) : root;
     let items;
     try {
@@ -237,10 +237,33 @@ export async function getRepoTree(
     } catch {
       return;
     }
-    const scope =
-      rel === '' || items.some((item) => item.name === '.git')
-        ? ((await scopeFor(rel)) ?? parentScope)
-        : parentScope;
+    // Resolve sibling repositories concurrently, with at most eight Git
+    // processes at once. Keep entry emission sequential for stable cap/order
+    // semantics, and never retain ignore results across calls.
+    const directories = items
+      .filter((item) => {
+        const childRel = rel ? `${rel}/${item.name}` : item.name;
+        return (
+          item.isDirectory() && !IGNORED_DIRS.has(item.name) && !isGitIgnored(scope, childRel, true)
+        );
+      })
+      .slice(0, Math.max(0, cap - entries.length));
+    const scopes = new Map<string, IgnoreScope | null>();
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(8, directories.length) }, async () => {
+        while (next < directories.length) {
+          const item = directories[next++];
+          const childRel = rel ? `${rel}/${item.name}` : item.name;
+          try {
+            await fsPromises.lstat(join(root, childRel, '.git'));
+          } catch {
+            continue;
+          }
+          scopes.set(childRel, (await scopeFor(childRel)) ?? scope);
+        }
+      })
+    );
     for (const item of items) {
       if (IGNORED_DIRS.has(item.name)) continue;
       const childRel = rel ? `${rel}/${item.name}` : item.name;
@@ -252,7 +275,7 @@ export async function getRepoTree(
       }
       if (item.isDirectory()) {
         entries.push({ path: childRel, type: 'tree', sha: '' });
-        await walk(childRel, scope);
+        await walk(childRel, scopes.get(childRel) ?? scope);
         if (truncated) return;
       } else if (item.isFile()) {
         let size: number | undefined;
@@ -267,7 +290,7 @@ export async function getRepoTree(
     }
   }
 
-  await walk('', null);
+  await walk('', await scopeFor(''));
   return { entries, truncated };
 }
 
