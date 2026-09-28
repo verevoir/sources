@@ -18,10 +18,11 @@ Direct in-process consumption (the usage shown below) is for: writing your own M
 
 - `@verevoir/sources` — core types, the `SourceAdapter` contract, the `SourceApiError` class, and the `envFromProcessEnv` helper. No source dependency.
 - `@verevoir/sources/github` — GitHub REST + Git Data adapter. Uses native `fetch`, no SDK dependency.
+- `@verevoir/sources/gitlab` — GitLab REST v4 adapter (gitlab.com and self-hosted). Native `fetch`, no SDK dependency. `openPullRequest` opens a merge request.
 - `@verevoir/sources/fs` — local filesystem adapter. `repoUrl` is a local directory path. No auth, no API. Reads/lists/walks/writes; fork + PR throw 501 (not applicable to a local filesystem).
 - `@verevoir/sources/notion` — Notion adapter via `@notionhq/client` (optional peer dep). Models a Notion workspace as a documentation tree: pages are files, child pages are subdirectories, content is the page's blocks rendered to Markdown. Ships a minimal Markdown↔blocks converter for round-tripping aigency-generated content; rich Notion features (tables, callouts, etc.) read as best-effort placeholders.
 
-Future adapters land alongside (`@verevoir/sources/gitlab`, `@verevoir/sources/bitbucket`, `@verevoir/sources/s3`) under the same contract.
+Future adapters land alongside (`@verevoir/sources/bitbucket`, `@verevoir/sources/s3`) under the same contract.
 
 ## Install
 
@@ -29,7 +30,7 @@ Future adapters land alongside (`@verevoir/sources/gitlab`, `@verevoir/sources/b
 npm install @verevoir/sources
 ```
 
-No mandatory peer dependencies — the GitHub adapter uses native `fetch`.
+No mandatory peer dependencies — the GitHub and GitLab adapters use native `fetch`.
 
 ## Canonical usage — GitHub
 
@@ -63,6 +64,57 @@ const prUrl = await openPullRequest(
   'Body of the PR.'
 );
 ```
+
+## Canonical usage — GitLab
+
+Same contract. `repoUrl` is a project URL; nested groups are fine
+(`https://gitlab.com/group/sub/project`), as are `.git` and `/-/…` UI suffixes.
+
+```ts
+import { envFromProcessEnv } from '@verevoir/sources';
+import { isGitlabUrl, readFile, commitFiles, openPullRequest } from '@verevoir/sources/gitlab';
+
+// GITLAB_TOKEN: read_api for reads, api for writes / forks / merge requests.
+// Optional for public projects — reads go anonymously when the token is ''.
+const env = envFromProcessEnv({
+  tokenVar: 'GITLAB_TOKEN',
+  forkOrgVar: 'GITLAB_FORK_NAMESPACE',
+  defaultForkOrg: '', // '' → forks land in the token owner's namespace
+}) ?? { token: '', forkOrg: '' };
+
+const project = 'https://gitlab.com/acme/platform/charts';
+const { content } = await readFile(env, project, 'README.md');
+
+// One atomic commit — the commits API applies every action or none.
+await commitFiles(
+  env,
+  project,
+  'feature/notes',
+  [{ path: 'docs/notes.md', content: '# Notes\n' }],
+  'Add notes'
+);
+
+// Same-project MR: head is the branch. From a fork: `<fork project path>:<branch>`.
+const mrUrl = await openPullRequest(env, project, 'feature/notes', 'main', 'Add notes', 'Body.');
+```
+
+**Hosts, and why they are an allowlist.** The API base is derived from the
+project URL's own origin, so every host the adapter talks to is sent the token.
+It therefore serves **gitlab.com plus exactly the hosts listed in
+`GITLAB_HOSTS`** (comma-separated, for self-hosted instances), **HTTPS only**,
+with no "looks like GitLab" matching — a `gitlab.*` pattern would hand the token
+to `gitlab.com.evil.io`. The adapter enforces this itself (a URL off the list is
+refused before any request), and `isGitlabUrl(url)` exposes the same check for
+routing. Every request, pagination links included, is pinned to that origin,
+and the token travels as `Authorization: Bearer`, which fetch strips on a
+cross-origin redirect.
+
+**GitLab specifics.** `isFresh` is a `HEAD` reading `X-Gitlab-Blob-Id` (no
+content download). `ensureFork` adopts an existing fork only if GitLab records
+it as forked from the upstream, and waits for GitLab's asynchronous fork import.
+A duplicate merge request (409) resolves to the open one from the same source
+project + branch. 429s retry per `Retry-After`; every request has a timeout;
+tree walks are bounded by pages and time and return `truncated` past either.
 
 ## Canonical usage — Local filesystem
 
@@ -128,7 +180,8 @@ openPullRequest(env, target, head, base, title, body) → Promise<string>
 getDefaultBranch(env, repoUrl)             → Promise<string>
 ```
 
-**`ref`, per adapter.** GitHub resolves a ref. The fs adapter reads a **working
+**`ref`, per adapter.** GitHub and GitLab resolve a ref (GitLab requires one,
+so an absent or empty ref resolves to the default branch). The fs adapter reads a **working
 tree**, which is whatever is checked out, so it cannot: a **non-empty `ref`
 throws `SourceApiError`** rather than quietly answering about the checkout. An
 absent or empty ref means "current" and is the normal case. Notion still
