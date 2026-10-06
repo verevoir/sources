@@ -399,4 +399,21 @@ describe('fs symlink containment', () => {
       /dangling.*broken or unreachable target/
     );
   });
+  it.skipIf(isRoot)(
+    "readFileNoFollow's generic open-failure fallback (EACCES, via an unreadable file) is wrapped in a SourceApiError naming the path and the real code: the read-side twin of the writeFileNoFollow fallback test, reached through readFile and isFresh (skipped as root: uid 0 bypasses DAC permission checks entirely)",
+    async () => {
+      await fsWriteFile(join(root, 'unreadable.txt'), 'SECRET');
+      await chmod(join(root, 'unreadable.txt'), 0o000);
+      try {
+        await expect(readFile(ENV, root, 'unreadable.txt')).rejects.toThrow(
+          /unreadable\.txt could not be opened for reading \(EACCES\)/
+        );
+        await expect(isFresh(ENV, root, 'unreadable.txt', 'x')).rejects.toThrow(
+          /unreadable\.txt could not be opened for reading \(EACCES\)/
+        );
+      } finally {
+        await chmod(join(root, 'unreadable.txt'), 0o644);
+      }
+    }
+  );
 });
