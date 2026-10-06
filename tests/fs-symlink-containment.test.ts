@@ -33,6 +33,7 @@ import {
   readFile as fsReadFile,
   rm,
   readdir,
+  chmod,
 } from 'node:fs/promises';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
@@ -43,8 +44,16 @@ import {
   listFiles,
   getRepoTree,
   writeFileNoFollow,
+  readFileNoFollow,
 } from '../src/fs/index.js';
+
 import type { SourceEnv } from '../src/index.js';
+
+// Permission-bit tests (EACCES) cannot be exercised as root -- uid 0 bypasses
+// DAC checks entirely on the usual CI/dev platforms, so a chmod'd directory
+// behaves as if it were never restricted. Skip those specific cases there,
+// with the reason stated, rather than let them pass vacuously.
+const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 
 const ENV = {} as unknown as SourceEnv;
 
@@ -112,12 +121,15 @@ describe('fs symlink containment', () => {
     expect(outsideEntries).not.toContain('new-file.txt');
   });
 
-  it('a symlink pointing INSIDE the root is read exactly like the file it points to', async () => {
+  it('a symlink pointing INSIDE the root is now ALSO refused for a read -- readFileNoFollow closes the leaf race the same way for reads as for writes, so a symlink leaf is refused whether it points in-root or out (round 3: previously this read was ALLOWED)', async () => {
     await fsWriteFile(join(root, 'in-root-target.txt'), 'INSIDE');
     await symlink('in-root-target.txt', join(root, 'in-link.txt'));
 
-    const result = await readFile(ENV, root, 'in-link.txt');
-    expect(result.content).toBe('INSIDE');
+    const attempt = readFile(ENV, root, 'in-link.txt');
+    await expect(attempt).rejects.toThrow(/symlink/);
+
+    const targetNow = await fsReadFile(join(root, 'in-root-target.txt'), 'utf8');
+    expect(targetNow).toBe('INSIDE');
   });
 
   it('a symlink pointing INSIDE the root is STILL refused for a write -- writes through ANY symlink are refused, in-root or not', async () => {
@@ -223,13 +235,13 @@ describe('fs symlink containment', () => {
     expect((outcome as Error).message).toMatch(/symlink/);
   });
 
-  it('CORRECTNESS: a self-referential symlink LEAF (a loop) is wrapped in a SourceApiError naming the path and the real ELOOP code, not a bare uncaught fs error', async () => {
+  it("CORRECTNESS: a self-referential symlink LEAF (a loop) is refused as a symlink, not a bare uncaught fs error -- readFileNoFollow's O_NOFOLLOW open reports ELOOP for a loop the same way it does for an ordinary symlink, so the message says 'symlink', matching writeFileNoFollow's own ELOOP wording, not the raw code", async () => {
     const loopPath = join(root, 'loop.txt');
     await symlink('loop.txt', loopPath);
 
     const attempt = readFile(ENV, root, 'loop.txt');
     await expect(attempt).rejects.toThrow(/loop\.txt/);
-    await expect(attempt).rejects.toThrow(/ELOOP/);
+    await expect(attempt).rejects.toThrow(/symlink/);
   });
 
   it('CORRECTNESS: a self-referential symlinked DIRECTORY in the ancestor chain is wrapped in a SourceApiError naming the path, not a bare fs error from the ancestor walk', async () => {
@@ -247,12 +259,61 @@ describe('fs symlink containment', () => {
     await expect(attempt).rejects.toThrow('not_found');
   });
 
-  it('TESTING: a symlink whose target does not exist (dangling, not a loop) is refused for reads, naming the path and the real ENOENT code', async () => {
+  it('TESTING: a symlink whose target does not exist (dangling, not a loop) is refused for reads -- O_NOFOLLOW refuses on the symlink itself, before ever trying to resolve where it points, so a dangling target gets the SAME refusal as any other symlink leaf', async () => {
     const danglingPath = join(root, 'dangling.txt');
     await symlink('does-not-exist-target.txt', danglingPath);
 
     const attempt = readFile(ENV, root, 'dangling.txt');
     await expect(attempt).rejects.toThrow(/dangling\.txt/);
-    await expect(attempt).rejects.toThrow(/ENOENT/);
+    await expect(attempt).rejects.toThrow(/symlink/);
   });
+
+  // --- lens-review round 3 (sources#31): security (reads), testing (EACCES branches) ---
+
+  it("SECURITY: readFileNoFollow refuses to open an existing symlink leaf AT THE SYSCALL, the SAME way writeFileNoFollow does for writes -- this is the actual read-side TOCTOU closure, not merely checkLeafSymlink's lstat-based message", async () => {
+    await fsWriteFile(join(elsewhere, 'target.txt'), 'SECRET');
+    await mkdir(join(root, 'outer'), { recursive: true });
+    const abs = join(root, 'outer', 'link.txt');
+    await symlink('../../elsewhere/target.txt', abs);
+
+    const outcome = await readFileNoFollow(abs, 'readFile', 'outer/link.txt').then(
+      () => 'resolved',
+      (e: unknown) => e
+    );
+
+    expect(outcome).not.toBe('resolved');
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/symlink/);
+  });
+
+  it.skipIf(isRoot)(
+    "CORRECTNESS: a non-ENOENT lstat failure (EACCES, via a search-permission-restricted parent) is wrapped in a SourceApiError naming the path and the real code, not a bare fs error -- exercises checkLeafSymlink's own lstat catch, shared by every write and by listFiles (skipped as root: uid 0 bypasses DAC permission checks entirely)",
+    async () => {
+      await mkdir(join(root, 'locked'), { recursive: true });
+      await fsWriteFile(join(root, 'locked', 'file.txt'), 'x');
+      await chmod(join(root, 'locked'), 0o000);
+      try {
+        const attempt = writeFile(ENV, root, 'locked/file.txt', 'PROBE', 'b', 'm');
+        await expect(attempt).rejects.toThrow(/locked\/file\.txt/);
+        await expect(attempt).rejects.toThrow(/EACCES/);
+      } finally {
+        await chmod(join(root, 'locked'), 0o755);
+      }
+    }
+  );
+
+  it.skipIf(isRoot)(
+    "CORRECTNESS: writeFileNoFollow's generic open-failure fallback (EACCES, via a write-restricted target directory) is wrapped in a SourceApiError naming the path and the real code, not a bare fs error -- the untested sibling of the already-tested ELOOP branch (skipped as root: uid 0 bypasses DAC permission checks entirely)",
+    async () => {
+      await mkdir(join(root, 'readonly'), { recursive: true });
+      await chmod(join(root, 'readonly'), 0o555);
+      try {
+        const attempt = writeFile(ENV, root, 'readonly/new-file.txt', 'PROBE', 'b', 'm');
+        await expect(attempt).rejects.toThrow(/readonly\/new-file\.txt/);
+        await expect(attempt).rejects.toThrow(/EACCES/);
+      } finally {
+        await chmod(join(root, 'readonly'), 0o755);
+      }
+    }
+  );
 });
