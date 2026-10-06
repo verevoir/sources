@@ -74,11 +74,22 @@ describe('fs symlink containment', () => {
     await mkdir(join(root, 'outer'), { recursive: true });
     await symlink('../../elsewhere/target.txt', join(root, 'outer', 'link.txt'));
 
-    const attempt = writeFile(ENV, root, 'outer/link.txt', 'PROBE', 'b', 'm');
-    await expect(attempt).rejects.toThrow(/symlink/);
+    // Settle the promise first -- a mutant that drops the lstat guard
+    // RESOLVES rather than rejects, so asserting `.rejects` alone just
+    // fails the assertion. Checking the outside file's content next
+    // proves the thing that actually matters: whether the escape
+    // itself happened, not merely whether an error was thrown.
+    const outcome = await writeFile(ENV, root, 'outer/link.txt', 'PROBE', 'b', 'm').then(
+      () => 'resolved',
+      (e: unknown) => e
+    );
 
     const outsideNow = await fsReadFile(join(elsewhere, 'target.txt'), 'utf8');
     expect(outsideNow).toBe('ORIGINAL');
+
+    expect(outcome).not.toBe('resolved');
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/symlink/);
   });
 
   it('a leaf symlink pointing OUTSIDE the root: readFile is also refused', async () => {
@@ -112,11 +123,21 @@ describe('fs symlink containment', () => {
     await fsWriteFile(join(root, 'in-root-target.txt'), 'INSIDE');
     await symlink('in-root-target.txt', join(root, 'in-link.txt'));
 
-    const attempt = writeFile(ENV, root, 'in-link.txt', 'NEW', 'b', 'm');
-    await expect(attempt).rejects.toThrow(/symlink/);
+    // Same discipline as the outside-root case above: settle the
+    // promise first, then check the file's actual content before the
+    // rejection reason, so the mutation proves the write itself, not
+    // only the thrown message.
+    const outcome = await writeFile(ENV, root, 'in-link.txt', 'NEW', 'b', 'm').then(
+      () => 'resolved',
+      (e: unknown) => e
+    );
 
     const targetNow = await fsReadFile(join(root, 'in-root-target.txt'), 'utf8');
     expect(targetNow).toBe('INSIDE');
+
+    expect(outcome).not.toBe('resolved');
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/symlink/);
   });
 
   it('listFiles through a symlinked-directory PREFIX refuses, rather than listing the outside', async () => {
