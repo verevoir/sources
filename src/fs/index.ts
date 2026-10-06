@@ -55,8 +55,21 @@
 //     inside the root — an in-root symlink (a vendored convenience
 //     link, say) reads exactly like the file it points to; one
 //     pointing outside is refused by name.
+//
+// The write-refusal above is the NAMED-MESSAGE case (an `lstat` that
+// already saw a symlink sitting there). The actual TOCTOU closure for
+// writes is `writeFileNoFollow`'s O_NOFOLLOW open, further down this
+// file -- the kernel refuses a symlink leaf AT OPEN TIME, whether or
+// not it existed a moment earlier when this lstat ran. That closes
+// the race at the LEAF only. A directory component swapped in further
+// up the path, between `ensureSafePath`'s one-time realpath check and
+// the eventual open, is NOT closed by this -- doing that fully needs
+// `openat`-style walking, which Node's fs API does not expose, and the
+// residual gap needs a CONCURRENT LOCAL attacker on this exact
+// machine, not a remote or pre-committed symlink. Found by
+// lens-review on sources#29; see CHANGELOG.md for the full account.
 
-import { promises as fsPromises } from 'node:fs';
+import { promises as fsPromises, constants as fsConstants } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -145,11 +158,20 @@ async function ensureSafePath(
     try {
       real = await fsPromises.realpath(probe);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT') {
         probe = dirname(probe);
         continue;
       }
-      throw err;
+      // Every other failure here (EACCES on a permission-restricted
+      // ancestor, ELOOP on a symlink loop, ...) is wrapped the same
+      // way every other throw in this file is -- a bare fs error
+      // reaching a caller through this ancestor walk would be the
+      // one path in the whole adapter that doesn't honour the
+      // SourceApiError contract. Found by lens-review on sources#29.
+      throw new SourceApiError(
+        `${verb}: ${relativePath} could not be checked at ${probe} (${code ?? String(err)})`
+      );
     }
     if (real !== realRoot && !real.startsWith(realRoot + '/')) {
       throw new SourceApiError(
@@ -165,15 +187,22 @@ async function ensureSafePath(
 /** `lstat` the target itself — never followed, unlike `stat`/`realpath`
  * — and decide what a symlink there means for `verb`.
  *
- * WRITES refuse outright when the leaf is a symlink, no matter where
- * it points: the same link that is safe right now can be repointed
- * between this check and the actual write (TOCTOU), so refusing
- * "the leaf is a symlink" entirely removes that race instead of
- * trying to close it.
+ * WRITES: when the leaf ALREADY IS a symlink at the moment this runs,
+ * refuse outright and say so plainly, no matter where it points. This
+ * is the clear-message path, not the actual race closure -- a link
+ * planted in the window between THIS lstat and the real write would
+ * sail through a check like this one alone (TOCTOU). The actual
+ * closure for writes is `writeFileNoFollow`'s O_NOFOLLOW open, below,
+ * which the kernel refuses atomically if the leaf is a symlink at
+ * open time, whether or not it was one when this lstat ran. This
+ * function's write branch exists so the common case -- a stale link
+ * already sitting there -- gets a clear, named message instead of a
+ * bare ELOOP from the open call.
  *
  * READS allow a symlink only when ITS OWN realpath resolves inside
  * `realRoot` — an in-root symlink reads exactly like the file it
- * points to; one pointing outside is refused by name.
+ * points to; one pointing outside, or one whose target doesn't exist
+ * at all, is refused by name.
  *
  * A target that doesn't exist yet, or exists but isn't a symlink, is
  * a no-op either way — the caller's own fs call handles it next. */
@@ -188,8 +217,14 @@ async function checkLeafSymlink(
   try {
     st = await fsPromises.lstat(abs);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return;
-    throw err;
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') return;
+    // EACCES, ELOOP (a symlink loop AT this exact path), ... -- wrapped
+    // like every other throw in this file. Found by lens-review on
+    // sources#29.
+    throw new SourceApiError(
+      `${verb}: ${relativePath} could not be checked (${code ?? String(err)})`
+    );
   }
   if (!st.isSymbolicLink()) return;
 
@@ -202,11 +237,72 @@ async function checkLeafSymlink(
   let real: string;
   try {
     real = await fsPromises.realpath(abs);
-  } catch {
-    throw new SourceApiError(`${verb}: ${relativePath} is a symlink with a broken target`);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    throw new SourceApiError(
+      `${verb}: ${relativePath} is a symlink with a broken or unreachable target (${code ?? String(err)})`
+    );
   }
   if (real !== realRoot && !real.startsWith(realRoot + '/')) {
     throw new SourceApiError(`${verb}: ${relativePath} is a symlink pointing outside the root`);
+  }
+}
+
+/** Open `abs` for writing with `O_NOFOLLOW` set, and write `content`
+ * through the resulting handle. The kernel refuses the open itself
+ * (`ELOOP`) if the leaf is a symlink AT OPEN TIME — closing the window
+ * `checkLeafSymlink`'s `lstat` cannot close on its own: that `lstat`
+ * can only report what the leaf was a moment ago, and a symlink
+ * planted in the gap between that check and a plain
+ * `fsPromises.writeFile` would still be followed. `checkLeafSymlink`
+ * stays for the common case (a symlink already sitting there gets a
+ * clear, named refusal); this is what actually closes the race for
+ * every case, including a brand-new path that didn't exist a moment
+ * ago.
+ *
+ * Exported so a test can call it directly against an already-planted
+ * symlink, bypassing `checkLeafSymlink`'s own `lstat` entirely, and
+ * prove the open call refuses on its own.
+ *
+ * REMAINING GAP, stated plainly rather than implied: this closes the
+ * race at the LEAF. It does not close a race at a DIRECTORY component
+ * further up the path — `ensureSafePath`'s ancestor walk resolves
+ * `realpath` once per call, and a directory swapped in after that
+ * check but before this open still reaches the eventual syscall by
+ * its new, unverified route. Closing that fully needs `openat`-style
+ * walking (open each component by file descriptor, never by
+ * re-resolved path), which Node's fs API does not expose. This
+ * residual gap needs a CONCURRENT LOCAL ATTACKER able to swap a
+ * directory on this exact machine between the containment check and
+ * the write — not a remote, pre-committed symlink, which is what the
+ * leaf fix above and the original finding were about. */
+export async function writeFileNoFollow(
+  abs: string,
+  content: string,
+  verb: string,
+  relativePath: string
+): Promise<void> {
+  let handle: Awaited<ReturnType<typeof fsPromises.open>>;
+  try {
+    handle = await fsPromises.open(
+      abs,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW
+    );
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ELOOP') {
+      throw new SourceApiError(
+        `${verb}: ${relativePath} is a symlink — refusing to write through it`
+      );
+    }
+    throw new SourceApiError(
+      `${verb}: ${relativePath} could not be opened for writing (${code ?? String(err)})`
+    );
+  }
+  try {
+    await handle.writeFile(content, 'utf8');
+  } finally {
+    await handle.close();
   }
 }
 
@@ -395,7 +491,7 @@ export async function writeFile(
   const { abs, realRoot } = await ensureSafePath(root, path, 'writeFile');
   await checkLeafSymlink(abs, realRoot, path, 'writeFile', 'write');
   await fsPromises.mkdir(dirname(abs), { recursive: true });
-  await fsPromises.writeFile(abs, content, 'utf8');
+  await writeFileNoFollow(abs, content, 'writeFile', path);
 }
 
 /** Reject a branch name that isn't a safe git ref before it reaches
@@ -491,7 +587,7 @@ export async function commitFiles(
     const { abs, realRoot } = await ensureSafePath(root, file.path, 'commitFiles');
     await checkLeafSymlink(abs, realRoot, file.path, 'commitFiles', 'write');
     await fsPromises.mkdir(dirname(abs), { recursive: true });
-    await fsPromises.writeFile(abs, file.content, 'utf8');
+    await writeFileNoFollow(abs, file.content, 'commitFiles', file.path);
     writtenPaths.push(file.path);
   }
 

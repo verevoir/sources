@@ -42,6 +42,7 @@ import {
   commitFiles,
   listFiles,
   getRepoTree,
+  writeFileNoFollow,
 } from '../src/fs/index.js';
 import type { SourceEnv } from '../src/index.js';
 
@@ -199,5 +200,59 @@ describe('fs symlink containment', () => {
     await commitFiles(ENV, root, 'b', files, 'm');
     const read3 = await readFile(ENV, root, 'another.txt');
     expect(read3.content).toBe('x');
+  });
+
+  // --- lens-review round 2 (sources#29): security, correctness, testing, docs ---
+
+  it('SECURITY: writeFileNoFollow refuses to open an existing symlink leaf AT THE SYSCALL, bypassing checkLeafSymlink entirely -- this is the actual TOCTOU closure, not merely the lstat-based message', async () => {
+    await fsWriteFile(join(elsewhere, 'target.txt'), 'ORIGINAL');
+    await mkdir(join(root, 'outer'), { recursive: true });
+    const abs = join(root, 'outer', 'link.txt');
+    await symlink('../../elsewhere/target.txt', abs);
+
+    const outcome = await writeFileNoFollow(abs, 'PROBE', 'writeFile', 'outer/link.txt').then(
+      () => 'resolved',
+      (e: unknown) => e
+    );
+
+    const outsideNow = await fsReadFile(join(elsewhere, 'target.txt'), 'utf8');
+    expect(outsideNow).toBe('ORIGINAL');
+
+    expect(outcome).not.toBe('resolved');
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/symlink/);
+  });
+
+  it('CORRECTNESS: a self-referential symlink LEAF (a loop) is wrapped in a SourceApiError naming the path and the real ELOOP code, not a bare uncaught fs error', async () => {
+    const loopPath = join(root, 'loop.txt');
+    await symlink('loop.txt', loopPath);
+
+    const attempt = readFile(ENV, root, 'loop.txt');
+    await expect(attempt).rejects.toThrow(/loop\.txt/);
+    await expect(attempt).rejects.toThrow(/ELOOP/);
+  });
+
+  it('CORRECTNESS: a self-referential symlinked DIRECTORY in the ancestor chain is wrapped in a SourceApiError naming the path, not a bare fs error from the ancestor walk', async () => {
+    const loopDir = join(root, 'loopdir');
+    await symlink('loopdir', loopDir, 'dir');
+
+    const attempt = writeFile(ENV, root, 'loopdir/file.txt', 'x', 'b', 'm');
+    await expect(attempt).rejects.toThrow(/loopdir\/file\.txt/);
+  });
+
+  it("TESTING: a root that does not exist yet exercises ensureSafePath's own 'root does not exist' branch, and still produces a clear not_found error rather than a crash", async () => {
+    const missingRoot = join(tmpRoot, 'does-not-exist-root');
+
+    const attempt = readFile(ENV, missingRoot, 'whatever.txt');
+    await expect(attempt).rejects.toThrow('not_found');
+  });
+
+  it('TESTING: a symlink whose target does not exist (dangling, not a loop) is refused for reads, naming the path and the real ENOENT code', async () => {
+    const danglingPath = join(root, 'dangling.txt');
+    await symlink('does-not-exist-target.txt', danglingPath);
+
+    const attempt = readFile(ENV, root, 'dangling.txt');
+    await expect(attempt).rejects.toThrow(/dangling\.txt/);
+    await expect(attempt).rejects.toThrow(/ENOENT/);
   });
 });
