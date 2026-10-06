@@ -26,6 +26,35 @@
 // What this is NOT:
 //   - Forkable. `ensureFork` and `openPullRequest` throw — they
 //     don't have a local-FS equivalent.
+//
+// SYMLINK CONTAINMENT (security fix). `ensureSafePath` rejects a
+// lexical escape (`..`, an absolute path) — but a path can stay
+// lexically inside `root` while a symlink SOMEWHERE along it, the
+// leaf itself or a directory component partway through, points
+// outside it. Verified finding: a committed leaf symlink
+// `outer/link.txt -> ../elsewhere/target.txt` let `writeFile` write
+// `../elsewhere/target.txt` even though the lexical path
+// `outer/link.txt` never left the root — containment was lexical
+// only, and the leaf was never `lstat`'d.
+//
+// Containment is now realpath-based. `ensureSafePath` resolves
+// `realpath(root)` once, then walks up from the target's PARENT to
+// the nearest existing ancestor and requires THAT ancestor's own real
+// path to still be inside the root — catching a symlinked directory
+// mid-path for every operation below, not only the ones that happen
+// to reach the leaf. The leaf itself gets its own check,
+// `checkLeafSymlink`, because what a symlinked LEAF means differs by
+// verb:
+//   - WRITES (and deletes, were one ever added) refuse outright when
+//     the leaf is a symlink, no matter where it points. The same
+//     link that is safe right now can be repointed between a check
+//     and the actual write (TOCTOU); refusing "the leaf is a
+//     symlink" entirely removes that race instead of trying to close
+//     it.
+//   - READS allow a symlink only when ITS OWN realpath resolves
+//     inside the root — an in-root symlink (a vendored convenience
+//     link, say) reads exactly like the file it points to; one
+//     pointing outside is refused by name.
 
 import { promises as fsPromises } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -67,16 +96,118 @@ function shaOf(content: string): string {
   return createHash('sha256').update(content).digest('hex').slice(0, 40);
 }
 
-/** Resolve a relative path under `root`, refusing any path that
- * escapes the root via `..` or absolute paths. Returns the absolute
- * filesystem path the adapter should touch. */
-function ensureSafePath(root: string, relativePath: string): string {
+/** Resolve a relative path under `root`, refusing a LEXICAL escape
+ * (`..`, an absolute path) and, separately, an escape through a
+ * symlinked directory ANYWHERE in the target's ancestry.
+ *
+ * `realpath(root)` is resolved once. Then, starting from the
+ * target's PARENT (never the target itself — what a symlink AT the
+ * leaf means is each verb's own decision; see `checkLeafSymlink`),
+ * this walks up to the nearest ancestor that actually exists on
+ * disk, and requires THAT ancestor's own real path to still be
+ * inside the resolved root. A component that does not exist yet (the
+ * normal case for a write about to `mkdir -p` it) is skipped only
+ * because there is nothing there yet to BE a symlink — the moment a
+ * directory component does exist, its real target is checked, so a
+ * symlinked directory mid-path (`dir-link/new-file.txt`) is caught
+ * even though `new-file.txt` has never existed.
+ *
+ * The lexical-escape message is unchanged from before this fix
+ * (`Path escapes the root: …`) — existing callers matching on it
+ * keep working. The new symlinked-directory message is distinct.
+ *
+ * Returns the absolute path to operate on and the resolved
+ * `realRoot`, which every verb also needs for its own leaf check. */
+async function ensureSafePath(
+  root: string,
+  relativePath: string,
+  verb: string
+): Promise<{ abs: string; realRoot: string }> {
   const rootAbs = resolve(root);
   const abs = resolve(rootAbs, relativePath);
   if (abs !== rootAbs && !abs.startsWith(rootAbs + '/')) {
     throw new SourceApiError(`Path escapes the root: ${relativePath}`);
   }
-  return abs;
+
+  let realRoot: string;
+  try {
+    realRoot = await fsPromises.realpath(rootAbs);
+  } catch {
+    // The root itself doesn't exist yet. Nothing to contain against —
+    // the caller's own fs call fails with its own, clearer ENOENT.
+    return { abs, realRoot: rootAbs };
+  }
+
+  let probe = dirname(abs);
+  for (let guard = 0; guard < 1024 && probe !== rootAbs; guard++) {
+    if (!probe.startsWith(rootAbs + '/')) break;
+    let real: string;
+    try {
+      real = await fsPromises.realpath(probe);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        probe = dirname(probe);
+        continue;
+      }
+      throw err;
+    }
+    if (real !== realRoot && !real.startsWith(realRoot + '/')) {
+      throw new SourceApiError(
+        `${verb}: ${relativePath} escapes the root via a symlinked directory`
+      );
+    }
+    break;
+  }
+
+  return { abs, realRoot };
+}
+
+/** `lstat` the target itself — never followed, unlike `stat`/`realpath`
+ * — and decide what a symlink there means for `verb`.
+ *
+ * WRITES refuse outright when the leaf is a symlink, no matter where
+ * it points: the same link that is safe right now can be repointed
+ * between this check and the actual write (TOCTOU), so refusing
+ * "the leaf is a symlink" entirely removes that race instead of
+ * trying to close it.
+ *
+ * READS allow a symlink only when ITS OWN realpath resolves inside
+ * `realRoot` — an in-root symlink reads exactly like the file it
+ * points to; one pointing outside is refused by name.
+ *
+ * A target that doesn't exist yet, or exists but isn't a symlink, is
+ * a no-op either way — the caller's own fs call handles it next. */
+async function checkLeafSymlink(
+  abs: string,
+  realRoot: string,
+  relativePath: string,
+  verb: string,
+  mode: 'read' | 'write'
+): Promise<void> {
+  let st;
+  try {
+    st = await fsPromises.lstat(abs);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return;
+    throw err;
+  }
+  if (!st.isSymbolicLink()) return;
+
+  if (mode === 'write') {
+    throw new SourceApiError(
+      `${verb}: ${relativePath} is a symlink — refusing to write through it`
+    );
+  }
+
+  let real: string;
+  try {
+    real = await fsPromises.realpath(abs);
+  } catch {
+    throw new SourceApiError(`${verb}: ${relativePath} is a symlink with a broken target`);
+  }
+  if (real !== realRoot && !real.startsWith(realRoot + '/')) {
+    throw new SourceApiError(`${verb}: ${relativePath} is a symlink pointing outside the root`);
+  }
 }
 
 /**
@@ -117,8 +248,9 @@ export async function readFile(
   void env;
   refuseRef(ref, 'readFile');
   try {
-    const safe = ensureSafePath(root, path);
-    const content = await fsPromises.readFile(safe, 'utf8');
+    const { abs, realRoot } = await ensureSafePath(root, path, 'readFile');
+    await checkLeafSymlink(abs, realRoot, path, 'readFile', 'read');
+    const content = await fsPromises.readFile(abs, 'utf8');
     return { content, sha: shaOf(content) };
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
@@ -137,8 +269,14 @@ export async function listFiles(
   void env;
   refuseRef(ref, 'listFiles');
   try {
-    const safe = ensureSafePath(root, prefix);
-    const items = await fsPromises.readdir(safe, { withFileTypes: true });
+    const { abs, realRoot } = await ensureSafePath(root, prefix, 'listFiles');
+    // The listed directory ITSELF is a leaf for this call — a
+    // symlinked prefix is refused unless its own realpath is inside
+    // the root, the same policy as a read (see `checkLeafSymlink`):
+    // listing THROUGH it would otherwise enumerate whatever is on
+    // the other side.
+    await checkLeafSymlink(abs, realRoot, prefix, 'listFiles', 'read');
+    const items = await fsPromises.readdir(abs, { withFileTypes: true });
     return items.map((item) => ({
       name: item.name,
       type: item.isDirectory()
@@ -184,6 +322,13 @@ export async function getRepoTree(env: SourceEnv, root: string, ref?: string): P
         return;
       }
       if (IGNORED_DIRS.has(item.name)) continue;
+      // A symlink is never followed or listed here, directory or
+      // file — walking through one could leave the root the same
+      // way an unguarded `readFile`/`writeFile` could. This used to
+      // be an INCIDENTAL consequence of `isDirectory()`/`isFile()`
+      // both being `false` for a symlink `Dirent`; made explicit so
+      // it isn't resting on that coincidence, and pinned by a test.
+      if (item.isSymbolicLink()) continue;
       const childRel = rel ? `${rel}/${item.name}` : item.name;
       if (item.isDirectory()) {
         entries.push({ path: childRel, type: 'tree', sha: '' });
@@ -226,8 +371,9 @@ export async function isFresh(
   void env;
   refuseRef(ref, 'isFresh');
   try {
-    const safe = ensureSafePath(root, path);
-    const content = await fsPromises.readFile(safe, 'utf8');
+    const { abs, realRoot } = await ensureSafePath(root, path, 'isFresh');
+    await checkLeafSymlink(abs, realRoot, path, 'isFresh', 'read');
+    const content = await fsPromises.readFile(abs, 'utf8');
     return shaOf(content) === version;
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return false;
@@ -246,9 +392,10 @@ export async function writeFile(
   void env;
   void branch;
   void commitMessage;
-  const safe = ensureSafePath(root, path);
-  await fsPromises.mkdir(dirname(safe), { recursive: true });
-  await fsPromises.writeFile(safe, content, 'utf8');
+  const { abs, realRoot } = await ensureSafePath(root, path, 'writeFile');
+  await checkLeafSymlink(abs, realRoot, path, 'writeFile', 'write');
+  await fsPromises.mkdir(dirname(abs), { recursive: true });
+  await fsPromises.writeFile(abs, content, 'utf8');
 }
 
 /** Reject a branch name that isn't a safe git ref before it reaches
@@ -307,7 +454,11 @@ export function gitDetail(err: unknown): string {
 /** Write every file, then — when the root is a git repo — check out `branch`,
  * stage, and commit. Best-effort locally: on a git failure the written files are
  * left on disk (the error names them; see the SourceAdapter contract). A non-git
- * root just gets the writes. Throws on empty files or an unsafe branch name. */
+ * root just gets the writes. Throws on empty files, an unsafe branch name, or
+ * ANY listed path that escapes the root or is itself a symlink (see
+ * `ensureSafePath`/`checkLeafSymlink` above) — checked per path, inside the same
+ * loop that writes, so an escape on file N still leaves files 1..N-1 written
+ * (unchanged from this function's pre-existing best-effort contract). */
 export async function commitFiles(
   env: SourceEnv,
   root: string,
@@ -337,9 +488,10 @@ export async function commitFiles(
 
   const writtenPaths: string[] = [];
   for (const file of files) {
-    const safe = ensureSafePath(root, file.path);
-    await fsPromises.mkdir(dirname(safe), { recursive: true });
-    await fsPromises.writeFile(safe, file.content, 'utf8');
+    const { abs, realRoot } = await ensureSafePath(root, file.path, 'commitFiles');
+    await checkLeafSymlink(abs, realRoot, file.path, 'commitFiles', 'write');
+    await fsPromises.mkdir(dirname(abs), { recursive: true });
+    await fsPromises.writeFile(abs, file.content, 'utf8');
     writtenPaths.push(file.path);
   }
 
