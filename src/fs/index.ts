@@ -27,69 +27,16 @@
 //   - Forkable. `ensureFork` and `openPullRequest` throw — they
 //     don't have a local-FS equivalent.
 //
-// SYMLINK CONTAINMENT (security fix). `ensureSafePath` rejects a
-// lexical escape (`..`, an absolute path) — but a path can stay
-// lexically inside `root` while a symlink SOMEWHERE along it, the
-// leaf itself or a directory component partway through, points
-// outside it. Verified finding: a committed leaf symlink
-// `outer/link.txt -> ../elsewhere/target.txt` let `writeFile` write
-// `../elsewhere/target.txt` even though the lexical path
-// `outer/link.txt` never left the root — containment was lexical
-// only, and the leaf was never `lstat`'d.
+// SYMLINK CONTAINMENT. Every operation resolves `realpath(root)` and requires
+// the nearest existing ancestor of its target to resolve inside it
+// (`ensureSafePath`); a root that fails to resolve for anything but ENOENT
+// fails closed. `writeFile`, `commitFiles`, `readFile` and `isFresh` open the
+// leaf with O_NOFOLLOW (internal ./nofollow.ts), so every symlink leaf is
+// refused at the syscall. `listFiles` has no O_NOFOLLOW equivalent and uses a
+// check-then-use test (`checkLeafSymlink`); `getRepoTree` skips symlinks.
+// The finding, the policy and the residual races are recorded once, in
+// CHANGELOG.md (0.10.0).
 //
-// Containment is now realpath-based. `ensureSafePath` resolves
-// `realpath(root)` once, then walks up from the target's PARENT to
-// the nearest existing ancestor and requires THAT ancestor's own real
-// path to still be inside the root — catching a symlinked directory
-// mid-path for every operation below, not only the ones that happen
-// to reach the leaf.
-//
-// THE LEAF ITSELF is closed differently depending on whether Node's
-// fs API lets the operation reach the kernel through an already-open
-// file descriptor:
-//   - CLOSED AT THE SYSCALL: `writeFile`, `commitFiles`, `readFile`
-//     and `isFresh` all open the leaf with `O_NOFOLLOW` set
-//     (`writeFileNoFollow` / `readFileNoFollow`, in the internal ./nofollow.ts) — the kernel
-//     refuses the open itself (`ELOOP`) if the leaf is a symlink AT
-//     OPEN TIME, whether or not it existed a moment earlier when any
-//     earlier check ran. This refuses EVERY symlink leaf outright,
-//     in-root or not: round 1 already made this the policy for
-//     writes (a safe in-root link can be repointed outside between a
-//     check and the write); this round gives reads the IDENTICAL
-//     policy and mechanism, closing the asymmetry lens-review found
-//     on sources#29/#31 (writes closed at the syscall, reads only
-//     checked via a racy `lstat`-then-follow). `checkLeafSymlink`'s
-//     write-mode branch still runs first, for the common case (a
-//     symlink already sitting there) — it gives a clear, named
-//     message before the open-level refusal would; it is not what
-//     actually closes the race.
-//   - CHECK-THEN-USE, NOT CLOSED AT THE SYSCALL: `listFiles`. Node's
-//     `fs.promises.readdir` takes a PATH, not an already-open
-//     directory handle, so there is no `O_NOFOLLOW`-equivalent way to
-//     list a directory's contents without a path-based lookup that
-//     could itself follow a symlink planted after the check.
-//     `listFiles` still uses `checkLeafSymlink`'s `lstat`+`realpath`
-//     check (allowing an in-root prefix, refusing one that resolves
-//     outside, or is broken) — a symlinked prefix planted in the
-//     window between that check and the `readdir` call would still
-//     be followed. This is the SAME class of residual gap as the
-//     directory-component one below, at the listed prefix instead of
-//     an ancestor; named here rather than left implied.
-//
-// RESIDUAL GAPS, stated plainly rather than implied — both need a
-// CONCURRENT LOCAL ATTACKER on this exact machine, not a remote or
-// pre-committed symlink, which is what this fix and the original
-// finding are about:
-//   - A directory component swapped in further up the path, between
-//     `ensureSafePath`'s one-time realpath check and the eventual
-//     open/readdir, is not closed by any of this — doing that fully
-//     needs `openat`-style walking, which Node's fs API does not
-//     expose.
-//   - `listFiles`'s own prefix leaf, per the check-then-use paragraph
-//     above.
-// See CHANGELOG.md for the full account, across all three
-// lens-review rounds on sources#29/#31.
-
 import { promises as fsPromises } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';

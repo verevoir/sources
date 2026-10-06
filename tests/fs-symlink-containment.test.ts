@@ -1,13 +1,8 @@
 // Real-filesystem tests for the symlink-escape fix in src/fs/index.ts.
 //
-// Verified finding (oversight, probing the real v4 belt): a committed
-// LEAF symlink `outer/link.txt -> ../elsewhere/target.txt` let
-// `writeFile` write `../elsewhere/target.txt` even though the lexical
-// path `outer/link.txt` never left the configured root -- containment
-// was lexical only, and the leaf was never `lstat`'d. These tests
-// exercise the real adapter against a real temp directory tree, no
-// mocks, so a regression has to actually touch the filesystem to be
-// missed.
+// Real temp directories, no mocks: a regression has to actually touch the
+// filesystem to be missed. The finding behind these tests is in
+// CHANGELOG.md (0.10.0).
 //
 // Policy pinned here:
 //   - a LEAF symlink pointing outside the root: writes refused, reads
