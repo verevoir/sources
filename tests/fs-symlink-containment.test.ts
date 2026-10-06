@@ -14,11 +14,12 @@
 //     refused;
 //   - a symlinked DIRECTORY mid-path pointing outside the root: a
 //     write beneath it refused;
-//   - a symlink pointing INSIDE the root: reads allowed (it reads
-//     exactly like the file it points to); writes refused regardless
-//     -- a write through ANY symlink is refused, in-root or not, so a
-//     link that is safe today can't be repointed outside between a
-//     check and the write (TOCTOU);
+//   - a symlink LEAF pointing INSIDE the root: refused for reads and
+//     writes alike (O_NOFOLLOW at the open), so a link that is safe today
+//     can't be repointed outside between a check and the use; listFiles
+//     alone still lists through an in-root symlinked PREFIX;
+//   - the root itself failing to resolve for any reason other than not
+//     existing yet fails CLOSED, never skipping containment;
 //   - the pre-existing lexical ".." refusal still holds, unchanged;
 //   - a plain file, with no symlink anywhere in its path, is
 //     unaffected by any of this.
@@ -250,6 +251,13 @@ describe('fs symlink containment', () => {
 
     const attempt = writeFile(ENV, root, 'loopdir/file.txt', 'x', 'b', 'm');
     await expect(attempt).rejects.toThrow(/loopdir\/file\.txt/);
+    // SECURITY: the error names only the caller's relative path, never the
+    // absolute server path of the ancestor it was probing.
+    const message = await attempt.then(
+      () => '',
+      (e: Error) => e.message
+    );
+    expect(message).not.toContain(tmpRoot);
   });
 
   it("TESTING: a root that does not exist yet exercises ensureSafePath's own 'root does not exist' branch, and still produces a clear not_found error rather than a crash", async () => {
@@ -316,4 +324,60 @@ describe('fs symlink containment', () => {
       }
     }
   );
+  it('SECURITY: a ROOT that is itself a symlink loop fails CLOSED in the containment check (ELOOP), rather than silently skipping the ancestor walk', async () => {
+    const loopRoot = join(tmpRoot, 'loop-root');
+    await symlink('loop-root', loopRoot, 'dir');
+
+    const attempt = writeFile(ENV, loopRoot, 'a.txt', 'PROBE', 'b', 'm');
+    const message = await attempt.then(
+      () => 'resolved',
+      (e: Error) => e.message
+    );
+    expect(message).toMatch(/a\.txt could not be checked: the root could not be resolved/);
+    expect(message).toMatch(/ELOOP/);
+    expect(message).not.toContain(tmpRoot);
+  });
+
+  it.skipIf(isRoot)(
+    'SECURITY: a ROOT that cannot be resolved for EACCES fails CLOSED in the containment check, rather than silently skipping the ancestor walk (skipped as root: uid 0 bypasses DAC permission checks entirely)',
+    async () => {
+      const lockedParent = join(tmpRoot, 'locked-parent');
+      const lockedRoot = join(lockedParent, 'repo');
+      await mkdir(lockedRoot, { recursive: true });
+      await chmod(lockedParent, 0o000);
+      try {
+        const attempt = readFile(ENV, lockedRoot, 'a.txt');
+        const message = await attempt.then(
+          () => 'resolved',
+          (e: Error) => e.message
+        );
+        expect(message).toMatch(/a\.txt could not be checked: the root could not be resolved/);
+        expect(message).toMatch(/EACCES/);
+        expect(message).not.toContain(tmpRoot);
+      } finally {
+        await chmod(lockedParent, 0o755);
+      }
+    }
+  );
+
+  it('isFresh refuses a symlink leaf at the open, in-root or pointing outside, the same way readFile does', async () => {
+    await fsWriteFile(join(elsewhere, 'secret.txt'), 'SECRET');
+    await fsWriteFile(join(root, 'inside.txt'), 'INSIDE');
+    await symlink(join(elsewhere, 'secret.txt'), join(root, 'out-link.txt'));
+    await symlink(join(root, 'inside.txt'), join(root, 'in-link.txt'));
+
+    await expect(isFresh(ENV, root, 'out-link.txt', 'x')).rejects.toThrow(/symlink/);
+    await expect(isFresh(ENV, root, 'in-link.txt', 'x')).rejects.toThrow(/symlink/);
+  });
+
+  it('listFiles through an IN-ROOT symlinked prefix lists exactly what the directory it points to holds', async () => {
+    await mkdir(join(root, 'realdir'), { recursive: true });
+    await fsWriteFile(join(root, 'realdir', 'a.txt'), 'A');
+    await symlink(join(root, 'realdir'), join(root, 'dirlink'), 'dir');
+
+    const viaLink = await listFiles(ENV, root, 'dirlink');
+    const direct = await listFiles(ENV, root, 'realdir');
+    expect(viaLink.map((e) => e.name)).toEqual(['a.txt']);
+    expect(viaLink.map((e) => e.name)).toEqual(direct.map((e) => e.name));
+  });
 });

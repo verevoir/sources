@@ -166,10 +166,16 @@ async function ensureSafePath(
   let realRoot: string;
   try {
     realRoot = await fsPromises.realpath(rootAbs);
-  } catch {
-    // The root itself doesn't exist yet. Nothing to contain against —
-    // the caller's own fs call fails with its own, clearer ENOENT.
-    return { abs, realRoot: rootAbs };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    // Only a root that doesn't exist yet skips the walk: there is nothing
+    // to contain against, and the caller's own fs call reports ENOENT.
+    // Anything else (EACCES, ELOOP, ...) fails CLOSED, never skips the
+    // containment check.
+    if (code === 'ENOENT') return { abs, realRoot: rootAbs };
+    throw new SourceApiError(
+      `${verb}: ${relativePath} could not be checked: the root could not be resolved (${code ?? String(err)})`
+    );
   }
 
   let probe = dirname(abs);
@@ -191,7 +197,7 @@ async function ensureSafePath(
       // one path in the whole adapter that doesn't honour the
       // SourceApiError contract. Found by lens-review on sources#29.
       throw new SourceApiError(
-        `${verb}: ${relativePath} could not be checked at ${probe} (${code ?? String(err)})`
+        `${verb}: ${relativePath} could not be checked (${code ?? String(err)})`
       );
     }
     if (real !== realRoot && !real.startsWith(realRoot + '/')) {
@@ -205,35 +211,13 @@ async function ensureSafePath(
   return { abs, realRoot };
 }
 
-/** `lstat` the target itself — never followed, unlike `stat`/`realpath`
- * — and decide what a symlink there means for `verb`.
- *
- * WRITES (the `write` mode -- `writeFile`/`commitFiles`): when the
- * leaf ALREADY IS a symlink at the moment this runs, refuse outright
- * and say so plainly, no matter where it points. This is the
- * clear-message path, not the actual race closure -- a link planted
- * in the window between THIS lstat and the real write would sail
- * through a check like this one alone (TOCTOU). The actual closure
- * for writes is `writeFileNoFollow`'s O_NOFOLLOW open, below, which
- * the kernel refuses atomically if the leaf is a symlink at open
- * time, whether or not it was one when this lstat ran. This
- * function's write branch exists so the common case -- a stale link
- * already sitting there -- gets a clear, named message instead of a
- * bare ELOOP from the open call.
- *
- * READS (the `read` mode): as of this round, `readFile` and `isFresh`
- * no longer call this function at all -- they close the race the
- * SAME way writes do, via `readFileNoFollow`'s own O_NOFOLLOW open,
- * refusing EVERY symlink leaf outright. `read` mode is now used ONLY
- * by `listFiles`, which has no O_NOFOLLOW-equivalent available (see
- * the module header) and so still needs this check-then-use
- * distinction: a symlink allowed only when ITS OWN realpath resolves
- * inside `realRoot` — an in-root symlink prefix lists exactly like
- * the directory it points to; one pointing outside, or one whose
- * target doesn't exist at all, is refused by name.
- *
- * A target that doesn't exist yet, or exists but isn't a symlink, is
- * a no-op either way — the caller's own fs call handles it next. */
+/** `lstat` the target itself (never followed) and decide what a symlink
+ * there means for `verb`. Write mode refuses any symlink leaf with a clear
+ * message; the race itself is closed by `writeFileNoFollow` (see the module
+ * header). Read mode is used only by `listFiles`, which has no O_NOFOLLOW
+ * equivalent: an in-root symlinked prefix is allowed, one resolving outside
+ * the root (or dangling) is refused. A missing or non-symlink target is a
+ * no-op. */
 async function checkLeafSymlink(
   abs: string,
   realRoot: string,
@@ -276,34 +260,11 @@ async function checkLeafSymlink(
   }
 }
 
-/** Open `abs` for writing with `O_NOFOLLOW` set, and write `content`
- * through the resulting handle. The kernel refuses the open itself
- * (`ELOOP`) if the leaf is a symlink AT OPEN TIME — closing the window
- * `checkLeafSymlink`'s `lstat` cannot close on its own: that `lstat`
- * can only report what the leaf was a moment ago, and a symlink
- * planted in the gap between that check and a plain
- * `fsPromises.writeFile` would still be followed. `checkLeafSymlink`
- * stays for the common case (a symlink already sitting there gets a
- * clear, named refusal); this is what actually closes the race for
- * every case, including a brand-new path that didn't exist a moment
- * ago.
- *
- * Exported so a test can call it directly against an already-planted
- * symlink, bypassing `checkLeafSymlink`'s own `lstat` entirely, and
- * prove the open call refuses on its own.
- *
- * REMAINING GAP, stated plainly rather than implied: this closes the
- * race at the LEAF. It does not close a race at a DIRECTORY component
- * further up the path — `ensureSafePath`'s ancestor walk resolves
- * `realpath` once per call, and a directory swapped in after that
- * check but before this open still reaches the eventual syscall by
- * its new, unverified route. Closing that fully needs `openat`-style
- * walking (open each component by file descriptor, never by
- * re-resolved path), which Node's fs API does not expose. This
- * residual gap needs a CONCURRENT LOCAL ATTACKER able to swap a
- * directory on this exact machine between the containment check and
- * the write — not a remote, pre-committed symlink, which is what the
- * leaf fix above and the original finding were about. */
+/** Write `content` to `abs` through an `O_NOFOLLOW` open, so the kernel
+ * refuses a symlink leaf at open time (`ELOOP`). This is the leaf-race
+ * closure for writes described in the module header, including its
+ * directory-component residual. Exported so a test can drive it against an
+ * already-planted symlink, bypassing `checkLeafSymlink`. */
 export async function writeFileNoFollow(
   abs: string,
   content: string,
@@ -334,26 +295,10 @@ export async function writeFileNoFollow(
   }
 }
 
-/** Open `abs` for reading with `O_NOFOLLOW` set, and read the content
- * through the resulting handle. The kernel refuses the open itself
- * (`ELOOP`) if the leaf is a symlink AT OPEN TIME — the SAME closure
- * `writeFileNoFollow` gives writes, now given to reads: EVERY symlink
- * leaf is refused, in-root or not, closing the asymmetry lens-review
- * found on sources#29/#31 (writes closed at the syscall; reads only
- * checked via a racy `lstat`-then-follow). A dangling symlink (one
- * whose target does not exist) gets the SAME refusal as any other
- * symlink leaf -- `O_NOFOLLOW` refuses on the symlink itself, before
- * ever trying to resolve where it points, so there is no separate
- * "broken target" case to distinguish here the way `checkLeafSymlink`
- * once had to.
- *
- * `ENOENT` (the path does not exist at all) is NOT wrapped -- it is
- * rethrown as-is, so `readFile`/`isFresh`'s own existing
- * not-found/false mapping, which matches on the raw error code,
- * keeps working unchanged.
- *
- * Exported so a test can call it directly against an already-planted
- * symlink, the same way `writeFileNoFollow` is. */
+/** Read `abs` through an `O_NOFOLLOW` open: the read-side twin of
+ * `writeFileNoFollow` (see the module header). Every symlink leaf is
+ * refused, dangling or not. `ENOENT` is rethrown unwrapped so callers'
+ * not-found mapping keeps working. Exported for the same test reason. */
 export async function readFileNoFollow(
   abs: string,
   verb: string,
