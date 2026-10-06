@@ -49,7 +49,7 @@
 // file descriptor:
 //   - CLOSED AT THE SYSCALL: `writeFile`, `commitFiles`, `readFile`
 //     and `isFresh` all open the leaf with `O_NOFOLLOW` set
-//     (`writeFileNoFollow` / `readFileNoFollow`, below) — the kernel
+//     (`writeFileNoFollow` / `readFileNoFollow`, in the internal ./nofollow.ts) — the kernel
 //     refuses the open itself (`ELOOP`) if the leaf is a symlink AT
 //     OPEN TIME, whether or not it existed a moment earlier when any
 //     earlier check ran. This refuses EVERY symlink leaf outright,
@@ -90,7 +90,7 @@
 // See CHANGELOG.md for the full account, across all three
 // lens-review rounds on sources#29/#31.
 
-import { promises as fsPromises, constants as fsConstants } from 'node:fs';
+import { promises as fsPromises } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -103,6 +103,7 @@ import {
   type RepoTree,
   type TreeEntry,
 } from '../index.js';
+import { readFileNoFollow, writeFileNoFollow } from './nofollow.js';
 
 const IGNORED_DIRS = new Set([
   '.git',
@@ -257,72 +258,6 @@ async function checkLeafSymlink(
   }
   if (real !== realRoot && !real.startsWith(realRoot + '/')) {
     throw new SourceApiError(`${verb}: ${relativePath} is a symlink pointing outside the root`);
-  }
-}
-
-/** Write `content` to `abs` through an `O_NOFOLLOW` open, so the kernel
- * refuses a symlink leaf at open time (`ELOOP`). This is the leaf-race
- * closure for writes described in the module header, including its
- * directory-component residual. Exported so a test can drive it against an
- * already-planted symlink, bypassing `checkLeafSymlink`. */
-export async function writeFileNoFollow(
-  abs: string,
-  content: string,
-  verb: string,
-  relativePath: string
-): Promise<void> {
-  let handle: Awaited<ReturnType<typeof fsPromises.open>>;
-  try {
-    handle = await fsPromises.open(
-      abs,
-      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW
-    );
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    if (code === 'ELOOP') {
-      throw new SourceApiError(
-        `${verb}: ${relativePath} is a symlink — refusing to write through it`
-      );
-    }
-    throw new SourceApiError(
-      `${verb}: ${relativePath} could not be opened for writing (${code ?? String(err)})`
-    );
-  }
-  try {
-    await handle.writeFile(content, 'utf8');
-  } finally {
-    await handle.close();
-  }
-}
-
-/** Read `abs` through an `O_NOFOLLOW` open: the read-side twin of
- * `writeFileNoFollow` (see the module header). Every symlink leaf is
- * refused, dangling or not. `ENOENT` is rethrown unwrapped so callers'
- * not-found mapping keeps working. Exported for the same test reason. */
-export async function readFileNoFollow(
-  abs: string,
-  verb: string,
-  relativePath: string
-): Promise<string> {
-  let handle: Awaited<ReturnType<typeof fsPromises.open>>;
-  try {
-    handle = await fsPromises.open(abs, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    if (code === 'ENOENT') throw err;
-    if (code === 'ELOOP') {
-      throw new SourceApiError(
-        `${verb}: ${relativePath} is a symlink — refusing to read through it`
-      );
-    }
-    throw new SourceApiError(
-      `${verb}: ${relativePath} could not be opened for reading (${code ?? String(err)})`
-    );
-  }
-  try {
-    return await handle.readFile('utf8');
-  } finally {
-    await handle.close();
   }
 }
 

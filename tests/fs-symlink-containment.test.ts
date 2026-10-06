@@ -44,9 +44,8 @@ import {
   commitFiles,
   listFiles,
   getRepoTree,
-  writeFileNoFollow,
-  readFileNoFollow,
 } from '../src/fs/index.js';
+import { writeFileNoFollow, readFileNoFollow } from '../src/fs/nofollow.js';
 
 import type { SourceEnv } from '../src/index.js';
 
@@ -379,5 +378,30 @@ describe('fs symlink containment', () => {
     const direct = await listFiles(ENV, root, 'realdir');
     expect(viaLink.map((e) => e.name)).toEqual(['a.txt']);
     expect(viaLink.map((e) => e.name)).toEqual(direct.map((e) => e.name));
+  });
+  it("the ancestor walk climbs past directories that don't exist yet: a new file under a NEW directory beneath an existing one is written inside the root", async () => {
+    await mkdir(join(root, 'existing'), { recursive: true });
+
+    await writeFile(ENV, root, 'existing/new/deeper/file.txt', 'NEW', 'b', 'm');
+
+    expect(await fsReadFile(join(root, 'existing', 'new', 'deeper', 'file.txt'), 'utf8')).toBe(
+      'NEW'
+    );
+  });
+
+  it('the ancestor walk climbs past a not-yet-existing directory to reach a symlinked one above it, and refuses: nothing is created outside', async () => {
+    await symlink(elsewhere, join(root, 'dirlink'), 'dir');
+
+    const attempt = writeFile(ENV, root, 'dirlink/new/deep.txt', 'PROBE', 'b', 'm');
+    await expect(attempt).rejects.toThrow(/escapes the root via a symlinked directory/);
+    expect(await readdir(elsewhere)).toEqual([]);
+  });
+
+  it('listFiles through a DANGLING symlinked prefix is refused by name, not listed or crashed on', async () => {
+    await symlink(join(root, 'no-such-dir'), join(root, 'dangling'), 'dir');
+
+    await expect(listFiles(ENV, root, 'dangling')).rejects.toThrow(
+      /dangling.*broken or unreachable target/
+    );
   });
 });
