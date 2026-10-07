@@ -317,11 +317,28 @@ export async function openPullRequest(
   return data.html_url;
 }
 
-/** Commit multiple files as ONE atomic commit via the Git Data API — the
- * branch ref is moved only after the new tree and commit are built, so a
- * failure at any step leaves the branch untouched (no partial write). This
- * is why it uses the low-level git API rather than the contents API, which
- * is one-commit-per-file. Throws on empty files or any failed API step. */
+/** Commit multiple files as ONE atomic commit via the Git Data API.
+ *
+ * The branch ref is created or moved ONLY as the FINAL step, after every
+ * blob/tree/commit step has already succeeded — so a failure at any
+ * earlier step (a bad blob, a tree-creation error, a commit-creation
+ * error) leaves no branch behind at all when the branch didn't exist yet,
+ * and leaves an EXISTING branch's ref completely untouched otherwise.
+ * (The previous version called `ensureBranch` up front, which created a
+ * brand-new branch before anything else had even started — a failure
+ * after that point left a real, pushed, empty-of-this-change branch
+ * sitting on the repo. Found by oversight's retrospective on
+ * sources#28/aa06ce6.)
+ *
+ * Each file's blob is placed into the new tree at the MODE its path
+ * already had in the base tree, when it already existed there (so an
+ * executable script stays executable); a genuinely new path defaults to
+ * `100644`. The previous version hardcoded `100644` for every file,
+ * silently dropping `+x` on an update.
+ *
+ * This is why it uses the low-level git API rather than the contents API,
+ * which is one-commit-per-file. Throws on empty files or any failed API
+ * step. */
 export async function commitFiles(
   env: SourceEnv,
   repoUrl: string,
@@ -334,16 +351,32 @@ export async function commitFiles(
   }
   const { owner, repo } = coords(repoUrl);
 
-  await ensureBranch(env, repoUrl, branch);
-
-  const branchRef = await ghCall<{ object?: { sha?: string } }>(
-    env,
-    'GET',
-    `/repos/${owner}/${repo}/git/refs/heads/${branch}`
-  );
-  const tipSha = branchRef.object?.sha;
+  // Determine the base tip WITHOUT creating the branch yet. If it already
+  // exists, build on its own tip; if not, build on the default branch's
+  // tip — the branch itself is only ever created at the very end.
+  let branchExisted: boolean;
+  let tipSha: string | undefined;
+  try {
+    const branchRef = await ghCall<{ object?: { sha?: string } }>(
+      env,
+      'GET',
+      `/repos/${owner}/${repo}/git/refs/heads/${branch}`
+    );
+    tipSha = branchRef.object?.sha;
+    branchExisted = true;
+  } catch (err) {
+    if (!(err instanceof SourceApiError) || err.status !== 404) throw err;
+    branchExisted = false;
+    const defaultBranch = await getDefaultBranch(env, repoUrl);
+    const defaultRef = await ghCall<{ object?: { sha?: string } }>(
+      env,
+      'GET',
+      `/repos/${owner}/${repo}/git/refs/heads/${defaultBranch}`
+    );
+    tipSha = defaultRef.object?.sha;
+  }
   if (!tipSha) {
-    throw new SourceApiError(`Could not resolve branch tip SHA for ${owner}/${repo}@${branch}`);
+    throw new SourceApiError(`Could not resolve a base tip SHA for ${owner}/${repo}@${branch}`);
   }
 
   const commitData = await ghCall<{ tree?: { sha?: string } }>(
@@ -356,6 +389,17 @@ export async function commitFiles(
     throw new SourceApiError(
       `Could not resolve base tree SHA from commit ${tipSha} on ${owner}/${repo}`
     );
+  }
+
+  // Full recursive listing of the base tree, so a file that already exists
+  // there keeps its own mode (100644, 100755, 120000, …) instead of every
+  // path collapsing to a hardcoded 100644.
+  const baseTreeListing = await ghCall<{
+    tree?: Array<{ path?: string; mode?: string; type?: string }>;
+  }>(env, 'GET', `/repos/${owner}/${repo}/git/trees/${baseTreeSha}?recursive=1`);
+  const modeByPath = new Map<string, string>();
+  for (const e of baseTreeListing.tree ?? []) {
+    if (e.path && e.mode && e.type === 'blob') modeByPath.set(e.path, e.mode);
   }
 
   const blobShas: string[] = [];
@@ -384,7 +428,7 @@ export async function commitFiles(
       base_tree: baseTreeSha,
       tree: files.map((file, i) => ({
         path: file.path,
-        mode: '100644',
+        mode: modeByPath.get(file.path) ?? '100644',
         type: 'blob',
         sha: blobShas[i],
       })),
@@ -410,9 +454,18 @@ export async function commitFiles(
     throw new SourceApiError(`Could not resolve new commit SHA on ${owner}/${repo}`);
   }
 
-  await ghCall(env, 'PATCH', `/repos/${owner}/${repo}/git/refs/heads/${branch}`, {
-    sha: newCommitSha,
-  });
+  // The branch is created or moved HERE — the final step, now that every
+  // earlier one has succeeded.
+  if (branchExisted) {
+    await ghCall(env, 'PATCH', `/repos/${owner}/${repo}/git/refs/heads/${branch}`, {
+      sha: newCommitSha,
+    });
+  } else {
+    await ghCall(env, 'POST', `/repos/${owner}/${repo}/git/refs`, {
+      ref: `refs/heads/${branch}`,
+      sha: newCommitSha,
+    });
+  }
 }
 
 /** Aggregate export matching the `SourceAdapter` contract from the

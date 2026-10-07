@@ -37,6 +37,16 @@
 // The finding, the policy and the residual races are recorded once, in
 // CHANGELOG.md (0.10.0).
 //
+// COMMITFILES SAFETY (0.11.0). `commitFiles` validates every path in the
+// batch BEFORE writing any of them (so a bad path leaves nothing written,
+// not just the earlier files silently kept); never uses `git checkout -B`
+// (which resets an EXISTING branch to HEAD, discarding its own history —
+// it checks out an existing, non-current branch only when the tree is
+// clean, and refuses otherwise); commits ONLY the paths it was given
+// (`git commit --only`, never a bare `git commit` that sweeps in whatever
+// else happens to be staged); and runs every git subprocess under a
+// narrowed environment with hooks disabled. See CHANGELOG.md (0.11.0).
+//
 import { promises as fsPromises } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -395,7 +405,7 @@ export async function writeFile(
 }
 
 /** Reject a branch name that isn't a safe git ref before it reaches
- * `git checkout -B` — a `-`-prefixed name would be read as an option, and the
+ * `git checkout -b` — a `-`-prefixed name would be read as an option, and the
  * rest are git ref-name rules (no whitespace or `~^:?*[\`, no `..` / `//` /
  * `@{`, no leading/trailing `/`, no trailing `.`). Validating at the boundary
  * means an unsafe branch is rejected before any file is written. */
@@ -447,14 +457,132 @@ export function gitDetail(err: unknown): string {
   return 'git failed and said nothing on any stream';
 }
 
-/** Write every file, then — when the root is a git repo — check out `branch`,
- * stage, and commit. Best-effort locally: on a git failure the written files are
- * left on disk (the error names them; see the SourceAdapter contract). A non-git
- * root just gets the writes. Throws on empty files, an unsafe branch name, or
- * ANY listed path that escapes the root or is itself a symlink (see
- * `ensureSafePath`/`checkLeafSymlink` above) — checked per path, inside the same
- * loop that writes, so an escape on file N still leaves files 1..N-1 written
- * (unchanged from this function's pre-existing best-effort contract). */
+/** A deliberately narrow environment for every git subprocess this module
+ * spawns, instead of the full, unfiltered `process.env` the old code passed
+ * implicitly (`execFile`'s default is to inherit the whole parent
+ * environment). `PATH` and `HOME` are kept — git needs them to find itself
+ * and the user's gitconfig. Any `GIT_*`-prefixed variable already set by the
+ * CALLER (a test's own `GIT_AUTHOR_NAME`/`GIT_COMMITTER_*` overrides, say)
+ * passes through, since those are deliberately git-scoped already. Nothing
+ * else from the host process's own environment — which could carry
+ * unrelated secrets this adapter has no reason to hand to a `git` child
+ * process — reaches it. Oversight's retrospective on sources#28/aa06ce6. */
+function narrowedGitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  if (process.env.PATH !== undefined) env.PATH = process.env.PATH;
+  if (process.env.HOME !== undefined) env.HOME = process.env.HOME;
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key.startsWith('GIT_') && value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
+/** The flags every git call in this module runs with: hooks disabled, so a
+ * repo-local pre-commit/pre-checkout hook never fires as a side effect of
+ * this adapter writing to someone's working tree. */
+const GIT_HOOKS_OFF = ['-c', 'core.hooksPath=/dev/null'];
+
+async function localBranchExists(
+  root: string,
+  branch: string,
+  env: NodeJS.ProcessEnv
+): Promise<boolean> {
+  try {
+    await execFileAsync(
+      'git',
+      [...GIT_HOOKS_OFF, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`],
+      { cwd: root, env }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function currentBranchName(root: string, env: NodeJS.ProcessEnv): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      [...GIT_HOOKS_OFF, 'rev-parse', '--abbrev-ref', 'HEAD'],
+      { cwd: root, env }
+    );
+    const name = stdout.trim();
+    return name === 'HEAD' ? null : name; // detached HEAD — never "current" for any named branch
+  } catch {
+    return null;
+  }
+}
+
+async function isWorkingTreeDirty(root: string, env: NodeJS.ProcessEnv): Promise<boolean> {
+  const { stdout } = await execFileAsync('git', [...GIT_HOOKS_OFF, 'status', '--porcelain'], {
+    cwd: root,
+    env,
+  });
+  return stdout.trim().length > 0;
+}
+
+/** Get `branch` checked out, WITHOUT ever using `git checkout -B`.
+ *
+ * `-B` creates-or-resets: pointed at an EXISTING branch, it resets that
+ * branch's tip to current HEAD, discarding whatever it already had —
+ * silent data loss the first time `commitFiles` targets a branch made by an
+ * earlier call that isn't the one currently checked out. Found by
+ * oversight's retrospective on sources#28/aa06ce6.
+ *
+ * - Branch doesn't exist yet: `checkout -b` from current HEAD. Always safe
+ *   — there is nothing on that ref yet to lose.
+ * - Branch exists and is already current: no-op.
+ * - Branch exists and is NOT current: checked out plainly (no `-B`), but
+ *   ONLY when the working tree is clean. A dirty tree here means either
+ *   pre-existing uncommitted work this call didn't make, or (since this
+ *   runs before `commitFiles`'s own write phase) nothing yet — either way,
+ *   carrying uncommitted changes across a switch onto a branch they were
+ *   never meant for is not safe to do silently, so this refuses instead. */
+async function checkoutTargetBranch(
+  root: string,
+  branch: string,
+  env: NodeJS.ProcessEnv
+): Promise<void> {
+  const exists = await localBranchExists(root, branch, env);
+  if (!exists) {
+    await execFileAsync('git', [...GIT_HOOKS_OFF, 'checkout', '-b', branch], { cwd: root, env });
+    return;
+  }
+  const current = await currentBranchName(root, env);
+  if (current === branch) {
+    return;
+  }
+  const dirty = await isWorkingTreeDirty(root, env);
+  if (dirty) {
+    throw new SourceApiError(
+      `commitFiles: branch ${JSON.stringify(branch)} already exists and is not currently checked ` +
+        'out, and the working tree has uncommitted changes — refusing to switch. ' +
+        '`git checkout -B` would reset it to HEAD, discarding its own history; carrying the dirty ' +
+        'tree across the switch is not safe either. Commit or stash first, then retry.'
+    );
+  }
+  await execFileAsync('git', [...GIT_HOOKS_OFF, 'checkout', branch], { cwd: root, env });
+}
+
+/** Write every file, then — when the root is a git repo — commit them on
+ * `branch` (creating it if missing). Best-effort locally: on a git failure
+ * the written files are left on disk (the error names them; see the
+ * SourceAdapter contract).
+ *
+ * Every path in the batch is validated (containment + the leaf-symlink
+ * check) BEFORE any of them is written, so a bad path anywhere in the
+ * batch leaves NOTHING written — not just the earlier files silently kept.
+ * A genuine write-phase I/O failure (disk full, a permission change
+ * mid-run, …) can still leave files 1..N-1 written while file N fails; the
+ * thrown error names exactly which paths got written. The branch is
+ * resolved and checked out BEFORE writing (see `checkoutTargetBranch`), so
+ * the new content lands on the TARGET branch's own tree. The final commit
+ * covers ONLY the given paths (`git commit --only`), never sweeping in
+ * anything else already staged — a bare `git commit` with no pathspec
+ * commits the WHOLE index, which is how that used to happen. Every git
+ * subprocess runs under a narrowed environment with hooks disabled. Three
+ * findings from oversight's retrospective on sources#28/aa06ce6; see
+ * CHANGELOG.md (0.11.0) for the fourth. */
 export async function commitFiles(
   env: SourceEnv,
   root: string,
@@ -476,19 +604,47 @@ export async function commitFiles(
     isGitRepo = false;
   }
 
-  // Validate the branch before writing anything, so an unsafe ref is rejected
-  // with no side effect (no files left on disk).
+  // Validate the branch before doing anything else, so an unsafe ref is
+  // rejected with no side effect at all (no checkout, no write).
   if (isGitRepo) {
     assertSafeBranch(branch);
   }
 
-  const writtenPaths: string[] = [];
+  // PRE-FLIGHT every path before writing ANY of them. Validating all of
+  // them here, in their own pass, means a path that fails containment or
+  // the leaf check leaves NOTHING written, for ANY file in the batch — not
+  // just the files after it.
+  const checked: { abs: string }[] = [];
   for (const file of files) {
     const { abs, realRoot } = await ensureSafePath(root, file.path, 'commitFiles');
     await checkLeafSymlink(abs, realRoot, file.path, 'commitFiles', 'write');
-    await fsPromises.mkdir(dirname(abs), { recursive: true });
-    await writeFileNoFollow(abs, file.content, 'commitFiles', file.path);
-    writtenPaths.push(file.path);
+    checked.push({ abs });
+  }
+
+  const gitEnv = narrowedGitEnv();
+
+  // Get the TARGET branch checked out before writing anything, so the new
+  // content lands on its tree (see `checkoutTargetBranch` for why this is
+  // not `git checkout -B`).
+  if (isGitRepo) {
+    await checkoutTargetBranch(root, branch, gitEnv);
+  }
+
+  // WRITE phase. Every path above is already validated, so a failure here
+  // is a genuine I/O error, not a containment/symlink refusal — and can
+  // still leave files 1..N-1 written while file N fails. Named explicitly.
+  const writtenPaths: string[] = [];
+  try {
+    for (let i = 0; i < files.length; i++) {
+      await fsPromises.mkdir(dirname(checked[i].abs), { recursive: true });
+      await writeFileNoFollow(checked[i].abs, files[i].content, 'commitFiles', files[i].path);
+      writtenPaths.push(files[i].path);
+    }
+  } catch (err) {
+    throw new SourceApiError(
+      `commitFiles: write failed after writing ${writtenPaths.length} of ${files.length} file(s) ` +
+        `(left on disk: ${writtenPaths.join(', ') || '(none)'}): ${gitDetail(err)}`
+    );
   }
 
   if (!isGitRepo) {
@@ -496,15 +652,28 @@ export async function commitFiles(
   }
 
   try {
-    await execFileAsync('git', ['checkout', '-B', branch], { cwd: root });
-    await execFileAsync('git', ['add', '--', ...writtenPaths], { cwd: root });
-    await execFileAsync('git', ['commit', '-m', commitMessage], { cwd: root });
+    // `add` is still needed so a BRAND NEW path is tracked at all (git
+    // will not commit a pathspec it has never seen) -- but the commit
+    // itself is restricted to exactly these paths with `--only`, so
+    // anything ELSE already staged (by the caller, or another process)
+    // is disregarded rather than swept into this commit. The original
+    // bug was a bare `git commit` with no pathspec after the `add` --
+    // that commits the WHOLE index, not just what was just added.
+    await execFileAsync('git', [...GIT_HOOKS_OFF, 'add', '--', ...writtenPaths], {
+      cwd: root,
+      env: gitEnv,
+    });
+    await execFileAsync(
+      'git',
+      [...GIT_HOOKS_OFF, 'commit', '--only', '-m', commitMessage, '--', ...writtenPaths],
+      { cwd: root, env: gitEnv }
+    );
   } catch (err) {
     // fs commitFiles is best-effort locally (see the SourceAdapter contract):
     // the files are already on disk, so surface the git failure AND the paths
     // left written, rather than swallowing it into a false success.
     throw new SourceApiError(
-      `commitFiles: git staging/commit failed for ${root}@${branch} ` +
+      `commitFiles: git commit failed for ${root}@${branch} ` +
         `(left on disk: ${writtenPaths.join(', ')}): ${gitDetail(err)}`
     );
   }

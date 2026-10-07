@@ -344,15 +344,15 @@ describe('commitFiles (atomic multi-file via the Git Data API)', () => {
       },
       {
         matchMethod: 'GET',
-        matchPath: /git\/refs\/heads\/main$/,
-        status: 200,
-        body: { object: { sha: 'tip' } },
-      },
-      {
-        matchMethod: 'GET',
         matchPath: /git\/commits\/tip$/,
         status: 200,
         body: { tree: { sha: 'basetree' } },
+      },
+      {
+        matchMethod: 'GET',
+        matchPath: /git\/trees\/basetree\?recursive=1$/,
+        status: 200,
+        body: { tree: [] },
       },
       { matchMethod: 'POST', matchPath: /git\/blobs$/, status: 201, body: { sha: 'blobA' } },
       { matchMethod: 'POST', matchPath: /git\/blobs$/, status: 201, body: { sha: 'blobB' } },
@@ -372,7 +372,9 @@ describe('commitFiles (atomic multi-file via the Git Data API)', () => {
       'atomic commit'
     );
 
-    const treeCall = calls.find((c) => /git\/trees$/.test(c.url))!;
+    const treeCall = calls.find(
+      (c) => /git\/trees$/.test(c.url) && (c.init.method ?? '').toUpperCase() === 'POST'
+    )!;
     const treeBody = JSON.parse(treeCall.init.body as string);
     expect(treeBody.base_tree).toBe('basetree');
     expect(treeBody.tree).toEqual([
@@ -391,6 +393,111 @@ describe('commitFiles (atomic multi-file via the Git Data API)', () => {
 
     const patchCall = calls.find((c) => (c.init.method ?? '').toUpperCase() === 'PATCH')!;
     expect(JSON.parse(patchCall.init.body as string)).toEqual({ sha: 'newcommit' });
+  });
+
+  it('REGRESSION: a mid-sequence failure (tree creation) never touches the branch ref — no partial state', async () => {
+    // Before this fix, `ensureBranch` ran FIRST and unconditionally created
+    // the branch (a POST to .../git/refs) before any blob/tree/commit step
+    // had even started — a failure later in the sequence still left that
+    // real, empty-of-this-change branch behind. The branch is now created
+    // (or moved) only as the FINAL step, so a failure anywhere before that
+    // — here, tree creation — must leave the ref completely untouched:
+    // no PATCH (an existing branch moved) and no POST to .../git/refs (a
+    // new one created).
+    scriptFetch([
+      { matchMethod: 'GET', matchPath: /git\/refs\/heads\/new-branch$/, status: 404, text: '' },
+      {
+        matchMethod: 'GET',
+        matchPath: /\/repos\/o\/r$/,
+        status: 200,
+        body: { default_branch: 'main' },
+      },
+      {
+        matchMethod: 'GET',
+        matchPath: /git\/refs\/heads\/main$/,
+        status: 200,
+        body: { object: { sha: 'defaulttip' } },
+      },
+      {
+        matchMethod: 'GET',
+        matchPath: /git\/commits\/defaulttip$/,
+        status: 200,
+        body: { tree: { sha: 'basetree' } },
+      },
+      {
+        matchMethod: 'GET',
+        matchPath: /git\/trees\/basetree\?recursive=1$/,
+        status: 200,
+        body: { tree: [] },
+      },
+      { matchMethod: 'POST', matchPath: /git\/blobs$/, status: 201, body: { sha: 'blobA' } },
+      { matchMethod: 'POST', matchPath: /git\/trees$/, status: 500, text: 'boom' },
+    ]);
+
+    await expect(
+      commitFiles(
+        env,
+        'https://github.com/o/r',
+        'new-branch',
+        [{ path: 'a.txt', content: 'AAA' }],
+        'msg'
+      )
+    ).rejects.toBeInstanceOf(SourceApiError);
+
+    expect(calls.some((c) => (c.init.method ?? '').toUpperCase() === 'PATCH')).toBe(false);
+    expect(
+      calls.some(
+        (c) => /\/git\/refs$/.test(c.url) && (c.init.method ?? '').toUpperCase() === 'POST'
+      )
+    ).toBe(false);
+  });
+
+  it("preserves an existing file's mode (e.g. +x) instead of hardcoding 100644", async () => {
+    scriptFetch([
+      {
+        matchMethod: 'GET',
+        matchPath: /git\/refs\/heads\/main$/,
+        status: 200,
+        body: { object: { sha: 'tip' } },
+      },
+      {
+        matchMethod: 'GET',
+        matchPath: /git\/commits\/tip$/,
+        status: 200,
+        body: { tree: { sha: 'basetree' } },
+      },
+      {
+        matchMethod: 'GET',
+        matchPath: /git\/trees\/basetree\?recursive=1$/,
+        status: 200,
+        body: { tree: [{ path: 'script.sh', mode: '100755', type: 'blob', sha: 'oldblob' }] },
+      },
+      { matchMethod: 'POST', matchPath: /git\/blobs$/, status: 201, body: { sha: 'newblob1' } },
+      { matchMethod: 'POST', matchPath: /git\/blobs$/, status: 201, body: { sha: 'newblob2' } },
+      { matchMethod: 'POST', matchPath: /git\/trees$/, status: 201, body: { sha: 'newtree' } },
+      { matchMethod: 'POST', matchPath: /git\/commits$/, status: 201, body: { sha: 'newcommit' } },
+      { matchMethod: 'PATCH', matchPath: /git\/refs\/heads\/main$/, status: 200, body: {} },
+    ]);
+
+    await commitFiles(
+      env,
+      'https://github.com/o/r',
+      'main',
+      [
+        { path: 'script.sh', content: 'updated' },
+        { path: 'new.txt', content: 'brand new' },
+      ],
+      'preserve mode'
+    );
+
+    const treeCall = calls.find(
+      (c) => /git\/trees$/.test(c.url) && (c.init.method ?? '').toUpperCase() === 'POST'
+    )!;
+    const treeBody = JSON.parse(treeCall.init.body as string);
+    expect(treeBody.tree).toEqual([
+      { path: 'script.sh', mode: '100755', type: 'blob', sha: 'newblob1' },
+      { path: 'new.txt', mode: '100644', type: 'blob', sha: 'newblob2' },
+    ]);
   });
 });
 

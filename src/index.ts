@@ -108,14 +108,30 @@ export interface SourceAdapter {
   ): Promise<void>;
   /** Commit multiple files together on `branch` (creating it if missing),
    * rather than N separate writeFile commits. Atomicity is backend-specific:
-   * GitHub is atomic — one Git Data API commit whose ref moves only after
-   * every blob/tree/commit step succeeds, so a failure leaves no partial
-   * state. GitLab is atomic too — one commits-API call that applies every
-   * file action or none. fs is best-effort locally — it writes the files, then (when the
-   * root is a git repo) stages + commits; a git failure throws but the
-   * already-written files are NOT rolled back, so on error the caller should
-   * inspect the working tree. Notion degrades to sequential writeFile. Empty
-   * `files` throws. */
+   * GitHub is atomic — the branch ref is created or moved ONLY as the final
+   * step, after every blob/tree/commit step has already succeeded, so a
+   * failure at any earlier step leaves no branch and no partial state.
+   * GitLab is atomic too — one commits-API call that applies every file
+   * action or none.
+   *
+   * fs and Notion are NOT atomic — both have a write phase that can fail
+   * partway through, and a caller should be ready to inspect what actually
+   * landed:
+   *   - fs validates every path (containment + the leaf-symlink check)
+   *     BEFORE writing any of them, so a bad path in the batch leaves
+   *     nothing written. A genuine I/O failure during the write phase
+   *     itself (disk full, a permission change mid-run, …) can still leave
+   *     files 1..N-1 written while file N fails — the thrown error names
+   *     exactly which paths were written. When the root is a git repo, it
+   *     then commits ONLY the given paths on `branch` (never sweeping in
+   *     anything else already staged); a git failure after a successful
+   *     write throws, naming the same written-paths list, and does not
+   *     roll the writes back.
+   *   - Notion loops sequential `writeFile` calls with no equivalent
+   *     preflight: a failure on file N leaves files 1..N-1 already written
+   *     to their pages, and the thrown error does not enumerate them.
+   *
+   * Empty `files` throws, for every backend. */
   commitFiles(
     env: SourceEnv,
     repoUrl: string,

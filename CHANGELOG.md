@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.11.0 — 2026-10-07
+
+- **Fixed (fs adapter `commitFiles`): four findings from oversight's retrospective on 0.10.0/aa06ce6, all real.**
+  1. **Silent partial write.** Every path in a batch is now validated (containment + the leaf-symlink check) BEFORE any of them is written — a bad path anywhere in the batch now leaves nothing written at all, not just the files before it silently kept. A genuine write-phase I/O failure (disk full, a permission change mid-run, …) can still leave files 1..N-1 written while file N fails; the thrown error now names exactly which paths were written, where before it didn't distinguish this case from the validation-failure case.
+  2. **Data loss via `git checkout -B`.** Checking out an EXISTING branch that isn't the one currently checked out used `-B`, which resets that branch's tip to current HEAD — discarding whatever was already committed on it. `commitFiles` now never uses `-B`: a branch that doesn't exist yet is still created with `checkout -b` (always safe — there's nothing on it yet to lose); an existing branch that isn't current is checked out plainly, and ONLY when the working tree is clean, refusing otherwise rather than risk losing or misattributing uncommitted work across the switch.
+  3. **Sweeping in pre-staged work.** The old sequence was `git add -- <paths>` followed by a BARE `git commit` with no pathspec — which commits the WHOLE index, including anything the caller (or another process) had already staged before calling `commitFiles`. It is now one call, `git commit --only -m <message> -- <paths>`, which commits exactly the given paths and disregards anything else staged.
+  4. **The full process environment, with hooks on.** Every git subprocess this adapter spawns now runs under a narrowed environment (`PATH`, `HOME`, and any `GIT_*` the caller already set — nothing else from the host process) and with `-c core.hooksPath=/dev/null`, so a repo-local pre-commit/pre-checkout hook never fires as a side effect of this adapter writing to someone's working tree.
+
+  All four are regression-tested against real repos, each verified by reverting the fix and watching the test go red.
+
+- **Fixed (github adapter `commitFiles`): two more findings from the same retrospective.**
+  1. **`ensureBranch` ran before the commit.** A brand-new branch was created up front, before any blob/tree/commit step had run — a failure after that point left a real, pushed, empty-of-this-change branch sitting on the repo. The branch is now created (or, if it already existed, moved) ONLY as the final step, after every earlier step has succeeded.
+  2. **Every file's mode hardcoded to `100644`.** Updating an executable file (`100755`) silently dropped its `+x` bit. A file that already exists in the base tree now keeps its own mode; a genuinely new path still defaults to `100644`.
+
+  A mid-sequence-failure test proves the branch ref is never touched when an earlier step fails; a mode-preservation test proves an existing file's mode survives an update.
+
+- **Docs: the `SourceAdapter.commitFiles` contract doc now states write-phase partiality for BOTH fs and Notion explicitly** (it previously only spelled this out for fs) — see `src/index.ts`. The 0.7.0 entry below describing fs's original `commitFiles` as sharing "the same branch model GitHub has" overclaimed: fs was never atomic the way GitHub is; see the correction appended there.
+
 ## 0.10.0 — 2026-10-06
 
 - **Security fix (fs adapter): a symlink anywhere in a path's ancestry escaped containment.** `ensureSafePath` refused a LEXICAL escape (`..`, an absolute path) but never `lstat`'d the leaf or `realpath`'d any ancestor — so a path that stayed lexically inside `root` could still resolve, via a symlink, to a file outside it. Verified finding: a committed leaf symlink `outer/link.txt -> ../elsewhere/target.txt` let `writeFile` write `../elsewhere/target.txt`, and the same shape would let a read exfiltrate it.
@@ -34,7 +52,7 @@
 
 ## 0.7.0 — 2026-07-05
 
-- **New: `commitFiles(env, repoUrl, branch, files[], commitMessage)` on the SourceAdapter contract** — commits multiple files as one atomic unit on a branch (creating it if missing), replacing N separate `writeFile` commits. GitHub makes a single commit via the Git Data API (blobs → tree on the branch's base tree → commit parenting the tip → move the ref); the fs adapter writes the files and, when the root is a git repo, checks out the branch and stages + commits — the same branch model GitHub has — surfacing any git failure rather than leaving a silent half-state; Notion degrades to sequential `writeFile`. (STDIO-535.)
+- **New: `commitFiles(env, repoUrl, branch, files[], commitMessage)` on the SourceAdapter contract** — commits multiple files as one atomic unit on a branch (creating it if missing), replacing N separate `writeFile` commits. GitHub makes a single commit via the Git Data API (blobs → tree on the branch's base tree → commit parenting the tip → move the ref); the fs adapter writes the files and, when the root is a git repo, checks out the branch and stages + commits — the same branch model GitHub has — surfacing any git failure rather than leaving a silent half-state; Notion degrades to sequential `writeFile`. (STDIO-535.) **Correction (0.11.0): "one atomic unit" and "the same branch model GitHub has" overclaimed fs's own guarantee — fs was never atomic the way GitHub is. Its write phase could leave files partially written with no notice, and `git checkout -B` (used here from the start) could reset an existing branch's history. See 0.11.0 above.**
 
 ## 0.5.0 — 2026-05-26
 
