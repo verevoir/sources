@@ -51,7 +51,7 @@ export async function writeFileNoFollow(
  *
  * Returns the RAW bytes (a `Buffer`), not a decoded string — the caller
  * decides how to interpret them (UTF-8 text, or binary via
- * `detectBinaryMediaType` in `../binary.js`). Deciding that here would mean
+ * `classifyFileContent` in `../binary.js`). Deciding that here would mean
  * every caller gets a decode whether it wants one or not. */
 export async function readFileNoFollow(
   abs: string,

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.0 — 2026-10-18
+
+- **Breaking: a signature match is now STRONG or WEAK, derived from the matched bytes, and a WEAK match defers to the text floor.** `binary.ts`'s signature table previously treated every magic-byte match as binary immediately. Several real formats are identified by printable-ASCII magic bytes that are also ordinary English text — `BM` (bmp), `MZ` (PE), `ID3` (mp3), `OTTO` (otf), `OggS` (ogg), `fLaC` (flac), `wOFF`/`wOF2` (woff/woff2), `GIF87a`/`GIF89a` (gif), `%PDF-` (pdf), and the RIFF- and `ftyp`-based signatures (webp, wav, avif, heic, mp4, quicktime) — and ordinary text starting with one of these strings (`"BMW notes"`, `"MZ, can you review this?"`, `"ID3 tags are a mess"`) was being reported as `binary` with no signal anything was wrong, discarding readable content. The strength split is derived automatically from a signature's own matched bytes (never set by hand on a table entry): STRONG if any matched byte falls outside printable ASCII (PNG's `\x89`, JPEG's `FF D8 FF`, gzip, ELF's `\x7F`, zip's `PK\x03\x04`, sqlite's trailing `\0`, wasm's `\0asm`, ...), WEAK otherwise. A STRONG match is binary immediately, as before. A WEAK match is binary only if the content ALSO fails the existing text floor (a NUL byte in the first 8 KiB, or an invalid UTF-8 decode); otherwise it is text, losslessly. Real files of the WEAK formats are unaffected — a real BMP, PE, ID3-tagged mp3, OTF font or GIF all contain a NUL byte early in their actual structure, so they still classify correctly.
+
+  **Migration:** every consumer that already switches exhaustively on `ReadFileResult['kind']` needs no change — the union itself (`'found' | 'binary'`) is unchanged; only which concrete byte sequences land in which branch moved, for the WEAK cases above. A caller that was relying on one of those specific magic-byte strings being reported as `binary` when the surrounding content is actually clean, decodable text will now see `'found'` instead.
+
+- **Fixed:** three doc comments referenced a name the shared classifier was never actually exported as (`detectBinaryMediaType`); they now name the real function, `classifyFileContent`.
+
 ## 0.10.0 — 2026-10-06
 
 - **Security fix (fs adapter): a symlink anywhere in a path's ancestry escaped containment.** `ensureSafePath` refused a LEXICAL escape (`..`, an absolute path) but never `lstat`'d the leaf or `realpath`'d any ancestor — so a path that stayed lexically inside `root` could still resolve, via a symlink, to a file outside it. Verified finding: a committed leaf symlink `outer/link.txt -> ../elsewhere/target.txt` let `writeFile` write `../elsewhere/target.txt`, and the same shape would let a read exfiltrate it.

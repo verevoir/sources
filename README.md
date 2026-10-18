@@ -41,8 +41,12 @@ import { readFile, writeFile, openPullRequest } from '@verevoir/sources/github';
 const env = envFromProcessEnv();
 if (!env) throw new Error('GITHUB_TOKEN not set');
 
-// Read a file from the default branch.
-const { content, sha } = await readFile(env, 'https://github.com/acme/charts', 'README.md');
+// Read a file from the default branch. `readFile` returns a discriminated
+// union: 'found' for text, 'binary' for anything classified as not text
+// (see "Handling binary content" below).
+const result = await readFile(env, 'https://github.com/acme/charts', 'README.md');
+if (result.kind !== 'found') throw new Error(`README.md is ${result.kind}, not text`);
+const { content, sha } = result;
 
 // Write a file on a feature branch (branch is created if missing).
 await writeFile(
@@ -168,7 +172,7 @@ try {
 Every subpath exposes the same set of functions (or a strict subset for read-only sources):
 
 ```ts
-readFile(env, repoUrl, path, ref?)         → Promise<{ content, sha }>   // fs: a non-empty ref THROWS — see below
+readFile(env, repoUrl, path, ref?)         → Promise<ReadFileResult>    // {kind:'found',content,sha} | {kind:'binary',mediaType,size,bytes} — fs: a non-empty ref THROWS, see below
 listFiles(env, repoUrl, prefix, ref?)      → Promise<DirEntry[]>
 getRepoTree(env, repoUrl, ref?)            → Promise<RepoTree>
 isFresh(env, repoUrl, path, version, ref?) → Promise<boolean>
@@ -191,6 +195,32 @@ there, and stated here rather than papered over.
 `isFresh` answers "is the `version` I'm holding still the live one for `(repoUrl, path, ref)`?" — the cheap freshness check cache layers (`@verevoir/context`'s `wrapWithCache`) use to validate held entries without re-fetching content. Returns `false` when the source has moved (including when the path no longer resolves).
 
 The `SourceAdapter` interface in `@verevoir/sources` captures this exactly. An aggregate export (e.g. `github`) is also available per subpath so generic callers can pass an adapter around as a single value.
+
+## Handling binary content
+
+`readFile` never guesses from a file extension — detection is from the
+content's own bytes. A PNG, a zip, or any other recognised format comes
+back as `{kind:'binary', mediaType, size, bytes}` instead of UTF-8-decoded
+(and corrupted) text. Implemented by the `fs` and `github` adapters today;
+`gitlab` and `notion` still decode every read as text.
+
+```ts
+const result = await readFile(env, repoUrl, 'assets/logo.png');
+if (result.kind === 'binary') {
+  console.log(`${result.mediaType}, ${result.size} bytes`);
+  // result.bytes is a Uint8Array of the raw content.
+} else {
+  console.log(result.content); // text, byte-for-byte unchanged
+}
+```
+
+A handful of real formats are identified by printable-ASCII magic bytes
+that collide with ordinary text (`BM`, `MZ`, `ID3`, `OTTO`, `OggS`, `fLaC`,
+`wOFF`/`wOF2`, `GIF87a`/`GIF89a`, `%PDF-`, and the RIFF- and `ftyp`-based
+signatures). These are trusted as binary only once the content also fails
+to decode as clean UTF-8 or contains a NUL byte early on — so ordinary text
+that happens to start with one of these strings (`"BMW notes"`, `"MZ, can
+you review this?"`) still reads back as text, losslessly.
 
 ## Errors
 

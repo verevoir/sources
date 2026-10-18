@@ -46,7 +46,7 @@ export class SourceApiError extends Error {
  *
  * `binary` is returned instead of silently UTF-8-decoding (and corrupting)
  * content that is not text, detected from the file's OWN bytes — never from
- * its extension or any declared content-type (see `detectBinaryMediaType` in
+ * its extension or any declared content-type (see `classifyFileContent` in
  * `./binary.js`). Implemented by the `fs` and `github` adapters; `gitlab`
  * and `notion` still decode every read as text (unchanged from before this
  * type existed) — their own binary detection is a follow-up. */

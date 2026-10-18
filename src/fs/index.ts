@@ -39,8 +39,11 @@
 //
 // BINARY DETECTION. `readFile` no longer decodes every file as UTF-8
 // unconditionally: it reads the raw bytes and runs them through
-// `detectBinaryMediaType` (shared with the `github` adapter) BEFORE
-// deciding. A detected binary file returns `{kind:'binary', mediaType,
+// `classifyFileContent` (shared with the `github` adapter), which trusts a
+// STRONG binary signature immediately and only trusts a WEAK one (ordinary
+// printable-ASCII magic bytes, e.g. "BM", "MZ", "ID3") once a NUL byte or
+// an invalid UTF-8 decode also says binary — see `../binary.js` for the
+// full rule. A detected binary file returns `{kind:'binary', mediaType,
 // size, bytes}` instead of corrupted "text" with no signal anything went
 // wrong. `isFresh` hashes the same raw bytes either way, so it needs no
 // special-casing for binary content.
