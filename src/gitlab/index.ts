@@ -256,7 +256,9 @@ export async function getDefaultBranch(env: SourceEnv, repoUrl: string): Promise
 /** GET /projects/:id/repository/files/:path?ref=… — UTF-8 content + blob sha.
  * GitLab requires a ref, so an absent or EMPTY one resolves to the default
  * branch — `''` means "current" across this package (it is the cache key an
- * unqualified read warms under), so it must not reach GitLab as `ref=`. */
+ * unqualified read warms under), so it must not reach GitLab as `ref=`.
+ * Always decodes as text — binary detection (`@verevoir/sources/fs` and
+ * `/github`) is not yet implemented for this adapter. */
 export async function readFile(
   env: SourceEnv,
   repoUrl: string,
@@ -273,7 +275,7 @@ export async function readFile(
   );
   const raw = data.content ?? '';
   const content = data.encoding === 'base64' ? Buffer.from(raw, 'base64').toString('utf8') : raw;
-  return { content, sha: data.blob_id ?? '' };
+  return { kind: 'found', content, sha: data.blob_id ?? '' };
 }
 
 type GlTreeItem = {

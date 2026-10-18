@@ -37,6 +37,14 @@
 // The finding, the policy and the residual races are recorded once, in
 // CHANGELOG.md (0.10.0).
 //
+// BINARY DETECTION. `readFile` no longer decodes every file as UTF-8
+// unconditionally: it reads the raw bytes and runs them through
+// `detectBinaryMediaType` (shared with the `github` adapter) BEFORE
+// deciding. A detected binary file returns `{kind:'binary', mediaType,
+// size, bytes}` instead of corrupted "text" with no signal anything went
+// wrong. `isFresh` hashes the same raw bytes either way, so it needs no
+// special-casing for binary content.
+//
 import { promises as fsPromises } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -51,6 +59,7 @@ import {
   type TreeEntry,
 } from '../index.js';
 import { readFileNoFollow, writeFileNoFollow } from './nofollow.js';
+import { classifyFileContent } from '../binary.js';
 
 const IGNORED_DIRS = new Set([
   '.git',
@@ -73,8 +82,10 @@ const DEFAULT_TREE_CAP = 5000;
 
 /** Surrogate sha — sha256 prefix of the content. Lets callers that
  * use sha for change-detection (e.g. cache invalidation) behave
- * predictably against FS reads. Not a git blob sha. */
-function shaOf(content: string): string {
+ * predictably against FS reads. Not a git blob sha. Accepts raw bytes
+ * directly (not only a decoded string) so a binary file's identity is
+ * hashed the same way a text file's is. */
+function shaOf(content: string | Uint8Array): string {
   return createHash('sha256').update(content).digest('hex').slice(0, 40);
 }
 
@@ -247,8 +258,17 @@ export async function readFile(
   refuseRef(ref, 'readFile');
   try {
     const { abs } = await ensureSafePath(root, path, 'readFile');
-    const content = await readFileNoFollow(abs, 'readFile', path);
-    return { content, sha: shaOf(content) };
+    const bytes = await readFileNoFollow(abs, 'readFile', path);
+    const classified = classifyFileContent(bytes);
+    if (classified.kind === 'binary') {
+      return {
+        kind: 'binary',
+        mediaType: classified.mediaType,
+        size: bytes.length,
+        bytes: new Uint8Array(bytes),
+      };
+    }
+    return { kind: 'found', content: classified.content, sha: shaOf(bytes) };
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
       throw new SourceApiError('not_found', 404);
@@ -369,8 +389,8 @@ export async function isFresh(
   refuseRef(ref, 'isFresh');
   try {
     const { abs } = await ensureSafePath(root, path, 'isFresh');
-    const content = await readFileNoFollow(abs, 'isFresh', path);
-    return shaOf(content) === version;
+    const bytes = await readFileNoFollow(abs, 'isFresh', path);
+    return shaOf(bytes) === version;
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return false;
     throw err;

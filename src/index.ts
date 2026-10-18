@@ -37,14 +37,22 @@ export class SourceApiError extends Error {
   }
 }
 
-/** A single read-file response: text content + the source's content
- * identifier (sha for git-based sources; etag/version for object
- * stores). The identifier is opaque to callers and used by update
- * paths that need a "prior version" handle. */
-export interface ReadFileResult {
-  content: string;
-  sha: string;
-}
+/** A single read-file response, discriminated by `kind`.
+ *
+ * `found` is the ordinary case: UTF-8 text content + the source's content
+ * identifier (sha for git-based sources; a content hash for fs; a page's
+ * last-edited timestamp for Notion). The identifier is opaque to callers and
+ * used by update paths that need a "prior version" handle.
+ *
+ * `binary` is returned instead of silently UTF-8-decoding (and corrupting)
+ * content that is not text, detected from the file's OWN bytes — never from
+ * its extension or any declared content-type (see `detectBinaryMediaType` in
+ * `./binary.js`). Implemented by the `fs` and `github` adapters; `gitlab`
+ * and `notion` still decode every read as text (unchanged from before this
+ * type existed) — their own binary detection is a follow-up. */
+export type ReadFileResult =
+  | { kind: 'found'; content: string; sha: string }
+  | { kind: 'binary'; mediaType: string; size: number; bytes: Uint8Array };
 
 /** Directory listing entry. */
 export interface DirEntry {

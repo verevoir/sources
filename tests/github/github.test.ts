@@ -121,6 +121,7 @@ describe('readFile', () => {
       },
     ]);
     const result = await readFile(env, 'foo/bar', 'README.md', 'feature-branch');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
     expect(result.content).toBe('hello world\n');
     expect(result.sha).toBe('abc123');
     expect(calls[0].url).toBe(
@@ -142,6 +143,60 @@ describe('readFile', () => {
       expect(err).toBeInstanceOf(SourceApiError);
       expect((err as SourceApiError).status).toBe(404);
     }
+  });
+
+  it("gives kind 'binary' with mediaType image/png, the right size and identical bytes, for a PNG fixture", async () => {
+    const png = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+      0x52,
+    ]);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: png.toString('base64'), sha: 'png-sha' },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'pic.png');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('image/png');
+    expect(result.size).toBe(png.length);
+    expect(Buffer.from(result.bytes)).toEqual(png);
+  });
+
+  it("gives kind 'binary' with mediaType application/octet-stream for a NUL-containing non-image file", async () => {
+    const data = Buffer.concat([
+      Buffer.from('not an image'),
+      Buffer.from([0x00]),
+      Buffer.from('more'),
+    ]);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: data.toString('base64'), sha: 'blob-sha' },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'blob.dat');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('application/octet-stream');
+    expect(result.size).toBe(data.length);
+    expect(Buffer.from(result.bytes)).toEqual(data);
+  });
+
+  it('reads non-ASCII UTF-8 text byte-for-byte unchanged (binary detection does not touch real text)', async () => {
+    const text = 'héllo wörld — 日本語\n';
+    scriptFetch([
+      {
+        status: 200,
+        body: {
+          type: 'file',
+          content: Buffer.from(text, 'utf8').toString('base64'),
+          sha: 'intl-sha',
+        },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'intl.md');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    expect(result.content).toBe(text);
   });
 });
 

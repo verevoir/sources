@@ -22,6 +22,7 @@ import {
   type RepoTree,
   type TreeEntry,
 } from '../index.js';
+import { classifyFileContent } from '../binary.js';
 
 const GH_API = 'https://api.github.com';
 const GH_API_VERSION = '2022-11-28';
@@ -124,8 +125,43 @@ export async function readFile(
   if (data.type !== 'file') {
     throw new SourceApiError(`${path} is type=${data.type}, not a file`);
   }
-  const content = Buffer.from(data.content ?? '', 'base64').toString('utf8');
-  return { content, sha: data.sha ?? '' };
+  const bytes = Buffer.from(data.content ?? '', 'base64');
+  const classified = classifyFileContent(bytes);
+  if (classified.kind === 'binary') {
+    return {
+      kind: 'binary',
+      mediaType: classified.mediaType,
+      size: bytes.length,
+      bytes: new Uint8Array(bytes),
+    };
+  }
+  return { kind: 'found', content: classified.content, sha: data.sha ?? '' };
+}
+
+/** GET /contents metadata only — the same type/directory checks `readFile`
+ * applies, but no base64 content is downloaded, decoded or run through
+ * binary detection. Used by `isFresh` and `writeFile`'s existing-sha
+ * lookup, neither of which looks at bytes at all. */
+async function fetchContentsMeta(
+  env: SourceEnv,
+  repoUrl: string,
+  path: string,
+  ref?: string
+): Promise<{ sha?: string }> {
+  const { owner, repo } = coords(repoUrl);
+  const query = ref ? `?ref=${encodeURIComponent(ref)}` : '';
+  const data = await ghCall<{ type?: string; sha?: string }>(
+    env,
+    'GET',
+    `/repos/${owner}/${repo}/contents/${path}${query}`
+  );
+  if (Array.isArray(data)) {
+    throw new SourceApiError(`${path} is a directory, not a file`);
+  }
+  if (data.type !== 'file') {
+    throw new SourceApiError(`${path} is type=${data.type}, not a file`);
+  }
+  return data;
 }
 
 /** GET /repos/{owner}/{repo}/contents/{prefix}?ref={branch}.
@@ -195,11 +231,9 @@ export async function getRepoTree(
 
 /** Returns true when the cached `version` (blob sha) is still the
  * current blob sha for `(path, ref)`; false when GitHub has moved
- * on (different sha) or the path no longer resolves (404). v0 does
- * the cheap thing operationally — one Contents API GET, sha compare
- * — wasting the base64 content download. Cheaper protocol variants
- * (ETag `If-None-Match`, `Accept: application/vnd.github.object`,
- * tree walks) can replace this when profiling shows it matters. */
+ * on (different sha) or the path no longer resolves (404). Uses
+ * `fetchContentsMeta` — one Contents API GET, sha compare, no base64
+ * content download (the v0 inefficiency this once had). */
 export async function isFresh(
   env: SourceEnv,
   repoUrl: string,
@@ -208,8 +242,8 @@ export async function isFresh(
   ref?: string
 ): Promise<boolean> {
   try {
-    const current = await readFile(env, repoUrl, path, ref);
-    return current.sha === version;
+    const meta = await fetchContentsMeta(env, repoUrl, path, ref);
+    return meta.sha === version;
   } catch (err) {
     if (err instanceof SourceApiError && err.status === 404) return false;
     throw err;
@@ -262,8 +296,8 @@ export async function writeFile(
   await ensureBranch(env, repoUrl, branch);
   let priorSha: string | undefined;
   try {
-    const existing = await readFile(env, repoUrl, path, branch);
-    priorSha = existing.sha;
+    const meta = await fetchContentsMeta(env, repoUrl, path, branch);
+    priorSha = meta.sha;
   } catch (err) {
     if (!(err instanceof SourceApiError) || err.status !== 404) throw err;
   }

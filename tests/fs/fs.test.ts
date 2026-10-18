@@ -32,6 +32,7 @@ describe('readFile', () => {
   it('reads content + returns a content-derived sha', async () => {
     await fsPromises.writeFile(join(root, 'a.txt'), 'hello world\n', 'utf8');
     const result = await readFile(env, root, 'a.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
     expect(result.content).toBe('hello world\n');
     expect(result.sha).toMatch(/^[a-f0-9]{40}$/);
   });
@@ -52,6 +53,41 @@ describe('readFile', () => {
 
   it('refuses absolute paths', async () => {
     await expect(readFile(env, root, '/etc/passwd')).rejects.toBeInstanceOf(SourceApiError);
+  });
+
+  it('reads non-ASCII UTF-8 text byte-for-byte unchanged (binary detection does not touch real text)', async () => {
+    const text = 'héllo wörld — 日本語\n';
+    await fsPromises.writeFile(join(root, 'intl.txt'), text, 'utf8');
+    const result = await readFile(env, root, 'intl.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    expect(result.content).toBe(text);
+  });
+
+  it("gives kind 'binary' with mediaType image/png, the right size and identical bytes, for a PNG fixture", async () => {
+    const png = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+      0x52,
+    ]);
+    await fsPromises.writeFile(join(root, 'pic.png'), png);
+    const result = await readFile(env, root, 'pic.png');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('image/png');
+    expect(result.size).toBe(png.length);
+    expect(Buffer.from(result.bytes)).toEqual(png);
+  });
+
+  it("gives kind 'binary' with mediaType application/octet-stream for a NUL-containing non-image file", async () => {
+    const data = Buffer.concat([
+      Buffer.from('not an image'),
+      Buffer.from([0x00]),
+      Buffer.from('more'),
+    ]);
+    await fsPromises.writeFile(join(root, 'blob.dat'), data);
+    const result = await readFile(env, root, 'blob.dat');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('application/octet-stream');
+    expect(result.size).toBe(data.length);
+    expect(Buffer.from(result.bytes)).toEqual(data);
   });
 });
 
@@ -151,15 +187,17 @@ describe('writeFile', () => {
 describe('isFresh', () => {
   it('returns true when version matches current content sha', async () => {
     await fsPromises.writeFile(join(root, 'a.txt'), 'hello', 'utf8');
-    const { sha } = await readFile(env, root, 'a.txt');
-    await expect(isFresh(env, root, 'a.txt', sha)).resolves.toBe(true);
+    const result = await readFile(env, root, 'a.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    await expect(isFresh(env, root, 'a.txt', result.sha)).resolves.toBe(true);
   });
 
   it('returns false when content has changed since the version was recorded', async () => {
     await fsPromises.writeFile(join(root, 'a.txt'), 'old', 'utf8');
-    const { sha: oldSha } = await readFile(env, root, 'a.txt');
+    const result = await readFile(env, root, 'a.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
     await fsPromises.writeFile(join(root, 'a.txt'), 'new', 'utf8');
-    await expect(isFresh(env, root, 'a.txt', oldSha)).resolves.toBe(false);
+    await expect(isFresh(env, root, 'a.txt', result.sha)).resolves.toBe(false);
   });
 
   it('returns false when the file no longer exists', async () => {
