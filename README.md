@@ -229,6 +229,11 @@ change. UTF-16 content with a byte-order mark (`FF FE` / `FE FF`) decodes
 as text too — checked ahead of every signature, so it is never
 misclassified as binary despite being full of NUL bytes.
 
+`fs`'s `sha` (on a `'found'` result) and `isFresh` hash the file's raw
+bytes, not the decoded text. A `sha` held from a BOM-prefixed file read
+before this change will compare as not-fresh once; every other text file
+is unaffected. `github`'s `sha` is GitHub's own blob sha and is untouched.
+
 ## Errors
 
 `SourceApiError` is thrown on transport / API failures. `status` carries the HTTP status when present; `detail` carries the truncated response body for non-404 errors. 404 is the conventional "ref / path doesn't exist" signal — callers fall back to default-branch reads or other recovery on that status.

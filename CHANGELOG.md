@@ -8,6 +8,8 @@
 
   Detection detail, not itself the breaking change (full rule below): a signature match is STRONG or WEAK depending on whether its matched bytes are printable ASCII — several real formats (bmp, PE, mp3's ID3 tag, otf, ogg, flac, woff/woff2, gif, pdf, tar's `ustar` header, and the RIFF-/`ftyp`-based formats) are identified by magic bytes that are also ordinary English text, so a WEAK match only counts as binary once the content also fails the text floor (a NUL byte in the first 8 KiB, or an invalid UTF-8 decode) — otherwise it decodes as `'found'`, losslessly. A STRONG match (PNG, JPEG, gzip, ELF, zip, ...) is binary immediately, as always. Real files of the WEAK formats are unaffected, since they contain a genuine NUL byte early in their real structure. A UTF-8 BOM is stripped as before this change; a UTF-16 BOM (`FF FE`/`FE FF`) is checked ahead of every signature and decodes as text too, despite being full of NUL bytes.
 
+- **Also changed: `fs`'s `sha` (on a `'found'` result) and `isFresh` now hash the RAW BYTES, not the decoded string.** A `sha` recorded under 0.10.x for a BOM-prefixed file will compare as not-fresh once under 0.11.0, since the BOM bytes are no longer stripped before hashing. Every other text file is unaffected — decoding then re-encoding valid, BOM-less UTF-8 is a no-op, so the hash is identical either way. `github`'s `sha` is GitHub's own blob sha and is untouched by this change.
+
 - **Fixed:** three doc comments referenced a name the shared classifier was never actually exported as (`detectBinaryMediaType`); they now name the real function, `classifyFileContent`.
 
 ## 0.10.0 — 2026-10-06
