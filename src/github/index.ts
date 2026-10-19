@@ -139,9 +139,10 @@ export async function readFile(
 }
 
 /** GET /contents metadata only — the same type/directory checks `readFile`
- * applies, but no base64 content is downloaded, decoded or run through
- * binary detection. Used by `isFresh` and `writeFile`'s existing-sha
- * lookup, neither of which looks at bytes at all. */
+ * applies. The Contents API always returns base64 `content` regardless;
+ * what this skips is decoding it and running it through binary
+ * detection. Used by `isFresh` and `writeFile`'s existing-sha lookup,
+ * neither of which looks at bytes at all. */
 async function fetchContentsMeta(
   env: SourceEnv,
   repoUrl: string,
@@ -232,8 +233,9 @@ export async function getRepoTree(
 /** Returns true when the cached `version` (blob sha) is still the
  * current blob sha for `(path, ref)`; false when GitHub has moved
  * on (different sha) or the path no longer resolves (404). Uses
- * `fetchContentsMeta` — one Contents API GET, sha compare, no base64
- * content download (the v0 inefficiency this once had). */
+ * `fetchContentsMeta` — one Contents API GET, sha compare; the API
+ * still returns base64 content on the wire, but this never decodes
+ * or classifies it. */
 export async function isFresh(
   env: SourceEnv,
   repoUrl: string,
