@@ -243,6 +243,24 @@ describe('readFile', () => {
     expect(result.content).toBe(text);
   });
 
+  it('a WEAK signature match ("BM") whose content also fails the text floor (invalid UTF-8, no NUL) is binary, not text', async () => {
+    const fixture = Buffer.concat([
+      Buffer.from('BM', 'ascii'),
+      Buffer.from([0xc3, 0x28]),
+      Buffer.from('padding so this is not a tiny buffer', 'ascii'),
+    ]);
+    expect(fixture.includes(0x00)).toBe(false);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: fixture.toString('base64'), sha: 'weak-invalid-sha' },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'weak-invalid.dat');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('image/bmp');
+  });
+
   it('reads non-ASCII UTF-8 text byte-for-byte unchanged (binary detection does not touch real text)', async () => {
     const text = 'héllo wörld — 日本語\n';
     scriptFetch([

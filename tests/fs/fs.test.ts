@@ -135,6 +135,19 @@ describe('readFile', () => {
     if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
     expect(result.content).toBe(text);
   });
+
+  it('a WEAK signature match ("BM") whose content also fails the text floor (invalid UTF-8, no NUL) is binary, not text', async () => {
+    const fixture = Buffer.concat([
+      Buffer.from('BM', 'ascii'),
+      Buffer.from([0xc3, 0x28]),
+      Buffer.from('padding so this is not a tiny buffer', 'ascii'),
+    ]);
+    expect(fixture.includes(0x00)).toBe(false);
+    await fsPromises.writeFile(join(root, 'weak-invalid.dat'), fixture);
+    const result = await readFile(env, root, 'weak-invalid.dat');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('image/bmp');
+  });
 });
 
 describe('listFiles', () => {
