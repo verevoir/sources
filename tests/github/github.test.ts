@@ -121,6 +121,7 @@ describe('readFile', () => {
       },
     ]);
     const result = await readFile(env, 'foo/bar', 'README.md', 'feature-branch');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
     expect(result.content).toBe('hello world\n');
     expect(result.sha).toBe('abc123');
     expect(calls[0].url).toBe(
@@ -142,6 +143,139 @@ describe('readFile', () => {
       expect(err).toBeInstanceOf(SourceApiError);
       expect((err as SourceApiError).status).toBe(404);
     }
+  });
+
+  it("gives kind 'binary' with mediaType image/png, the right size and identical bytes, for a PNG fixture", async () => {
+    const png = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+      0x52,
+    ]);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: png.toString('base64'), sha: 'png-sha' },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'pic.png');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('image/png');
+    expect(result.size).toBe(png.length);
+    expect(Buffer.from(result.bytes)).toEqual(png);
+  });
+
+  it("gives kind 'binary' with mediaType application/octet-stream for a NUL-containing non-image file", async () => {
+    const data = Buffer.concat([
+      Buffer.from('not an image'),
+      Buffer.from([0x00]),
+      Buffer.from('more'),
+    ]);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: data.toString('base64'), sha: 'blob-sha' },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'blob.dat');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('application/octet-stream');
+    expect(result.size).toBe(data.length);
+    expect(Buffer.from(result.bytes)).toEqual(data);
+  });
+
+  it('strips a UTF-8 BOM and returns the decoded text, not the BOM bytes', async () => {
+    const withBom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('hello', 'utf8')]);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: withBom.toString('base64'), sha: 'bom-sha' },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'bom.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    expect(result.content).toBe('hello');
+  });
+
+  it('decodes UTF-16LE with a BOM as text, even though the bytes are full of NUL', async () => {
+    const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('hello', 'utf16le')]);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: utf16.toString('base64'), sha: 'u16-sha' },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'utf16.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    expect(result.content).toBe('hello');
+  });
+
+  it('gives binary octet-stream for invalid UTF-8 with no recognised signature and no NUL byte', async () => {
+    const invalid = Buffer.concat([
+      Buffer.from('plain text start, no signature here: '),
+      Buffer.from([0xc3, 0x28]),
+      Buffer.from(' more text after the bad byte'),
+    ]);
+    expect(invalid.includes(0x00)).toBe(false);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: invalid.toString('base64'), sha: 'inv-sha' },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'invalid.dat');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('application/octet-stream');
+  });
+
+  it('reads ordinary text starting with a WEAK signature prefix ("BM") as text, unchanged', async () => {
+    const text = 'BMW notes on the quarterly report.\n';
+    scriptFetch([
+      {
+        status: 200,
+        body: {
+          type: 'file',
+          content: Buffer.from(text, 'utf8').toString('base64'),
+          sha: 'weak-sha',
+        },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'weak.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    expect(result.content).toBe(text);
+  });
+
+  it('a WEAK signature match ("BM") whose content also fails the text floor (invalid UTF-8, no NUL) is binary, not text', async () => {
+    const fixture = Buffer.concat([
+      Buffer.from('BM', 'ascii'),
+      Buffer.from([0xc3, 0x28]),
+      Buffer.from('padding so this is not a tiny buffer', 'ascii'),
+    ]);
+    expect(fixture.includes(0x00)).toBe(false);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: fixture.toString('base64'), sha: 'weak-invalid-sha' },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'weak-invalid.dat');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('image/bmp');
+  });
+
+  it('reads non-ASCII UTF-8 text byte-for-byte unchanged (binary detection does not touch real text)', async () => {
+    const text = 'héllo wörld — 日本語\n';
+    scriptFetch([
+      {
+        status: 200,
+        body: {
+          type: 'file',
+          content: Buffer.from(text, 'utf8').toString('base64'),
+          sha: 'intl-sha',
+        },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'intl.md');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    expect(result.content).toBe(text);
   });
 });
 
@@ -184,6 +318,44 @@ describe('isFresh', () => {
     await expect(isFresh(env, 'foo/bar', 'README.md', 'sha', 'main')).rejects.toBeInstanceOf(
       SourceApiError
     );
+  });
+});
+
+describe('isFresh — BOM and binary content behave like any other file', () => {
+  it('BOM file: true for the recorded sha, false once GitHub reports it has moved', async () => {
+    const withBom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('hello', 'utf8')]);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: withBom.toString('base64'), sha: 'bom-sha-1' },
+      },
+    ]);
+    await expect(isFresh(env, 'foo/bar', 'bom.txt', 'bom-sha-1', 'main')).resolves.toBe(true);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: withBom.toString('base64'), sha: 'bom-sha-2' },
+      },
+    ]);
+    await expect(isFresh(env, 'foo/bar', 'bom.txt', 'bom-sha-1', 'main')).resolves.toBe(false);
+  });
+
+  it('binary file: true for the recorded sha, false once GitHub reports it has moved', async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: png.toString('base64'), sha: 'png-sha-1' },
+      },
+    ]);
+    await expect(isFresh(env, 'foo/bar', 'pic.png', 'png-sha-1', 'main')).resolves.toBe(true);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: png.toString('base64'), sha: 'png-sha-2' },
+      },
+    ]);
+    await expect(isFresh(env, 'foo/bar', 'pic.png', 'png-sha-1', 'main')).resolves.toBe(false);
   });
 });
 
@@ -453,5 +625,48 @@ describe('getRepoTree resolves the ref the same way its neighbours do', () => {
     scriptFetch([{ status: 200, body: { commit: {} } }]);
 
     await expect(getRepoTree(env, 'foo/bar', 'main')).rejects.toBeInstanceOf(SourceApiError);
+  });
+});
+
+// fetchContentsMeta (the metadata-only GET behind isFresh and writeFile's
+// prior-sha lookup) has its own directory/type guards, identical in shape to
+// readFile's -- but reached through a different caller here, never readFile.
+describe('isFresh — fetchContentsMeta guards (reached through isFresh, not readFile)', () => {
+  it('throws, naming the path, when it resolves to a directory -- fetchContentsMeta rejects before isFresh ever compares a sha', async () => {
+    scriptFetch([{ status: 200, body: [] }]); // an array body means "this is a directory"
+    await expect(isFresh(env, 'foo/bar', 'src', 'whatever', 'main')).rejects.toThrow(
+      /src is a directory, not a file/
+    );
+  });
+
+  it('throws, naming the type, when it resolves to a non-file type (e.g. a submodule)', async () => {
+    scriptFetch([{ status: 200, body: { type: 'submodule', sha: 'sub-sha' } }]);
+    await expect(isFresh(env, 'foo/bar', 'vendor/lib', 'whatever', 'main')).rejects.toThrow(
+      /vendor\/lib is type=submodule, not a file/
+    );
+  });
+});
+
+describe('writeFile — fetchContentsMeta guards (reached through writeFile, not readFile)', () => {
+  it('throws, naming the path, when the target resolves to a directory, and never issues the PUT', async () => {
+    scriptFetch([
+      { status: 200, body: { object: { sha: 'x' } } }, // ensureBranch: branch exists
+      { status: 200, body: [] }, // fetchContentsMeta: directory
+    ]);
+    await expect(
+      writeFile(env, 'foo/bar', 'src', 'new content', 'aigency/TP-5', 'msg')
+    ).rejects.toThrow(/src is a directory, not a file/);
+    expect(calls).toHaveLength(2); // confirms the PUT (a 3rd call) never happened
+  });
+
+  it('throws, naming the type, when the target resolves to a non-file type, and never issues the PUT', async () => {
+    scriptFetch([
+      { status: 200, body: { object: { sha: 'x' } } },
+      { status: 200, body: { type: 'submodule', sha: 'sub-sha' } },
+    ]);
+    await expect(
+      writeFile(env, 'foo/bar', 'vendor/lib', 'new content', 'aigency/TP-5', 'msg')
+    ).rejects.toThrow(/vendor\/lib is type=submodule, not a file/);
+    expect(calls).toHaveLength(2);
   });
 });

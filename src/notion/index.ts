@@ -233,7 +233,9 @@ async function resolveOrCreatePath(c: Client, rootId: string, path: string): Pro
 /** Read the page at `path` (relative to the root page identified
  * by `rootUrl`) as Markdown. Returns the page's `last_edited_time`
  * as `sha` for use as a freshness handle. Throws 404 when the path
- * doesn't resolve. */
+ * doesn't resolve. Always decodes as text — binary detection
+ * (`@verevoir/sources/fs` and `/github`) is not yet implemented for
+ * this adapter. */
 export async function readFile(
   env: SourceEnv,
   rootUrl: string,
@@ -259,7 +261,7 @@ export async function readFile(
       const e = bodyErr as { code?: string; status?: number };
       if (e?.code !== 'object_not_found' && e?.status !== 404) throw bodyErr;
     }
-    return { content, sha: lastEditedTime };
+    return { kind: 'found', content, sha: lastEditedTime };
   } catch (err) {
     throw mapError(err, `readFile(${pageId})`);
   }

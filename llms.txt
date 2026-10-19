@@ -41,11 +41,13 @@ import { readFile, writeFile, openPullRequest } from '@verevoir/sources/github';
 const env = envFromProcessEnv();
 if (!env) throw new Error('GITHUB_TOKEN not set');
 
-const { content } = await readFile(
+const result = await readFile(
   env,
   'https://github.com/acme/charts',
   'README.md',
 );
+if (result.kind !== 'found') throw new Error(`README.md is ${result.kind}, not text`);
+const { content } = result;
 
 await writeFile(
   env,
@@ -69,7 +71,7 @@ const prUrl = await openPullRequest(
 ## The contract
 
 ```ts
-readFile(env, repoUrl, path, ref?) → Promise<{ content, sha }>
+readFile(env, repoUrl, path, ref?) → Promise<ReadFileResult>  // {kind:'found',content,sha} | {kind:'binary',mediaType,size,bytes}
 listFiles(env, repoUrl, prefix, ref?) → Promise<DirEntry[]>
 getRepoTree(env, repoUrl, ref?) → Promise<RepoTree>
 isFresh(env, repoUrl, path, version, ref?) → Promise<boolean>  // cheap "is held version still current?" check used by cache layers
@@ -81,6 +83,10 @@ ensureFork(env, upstreamUrl) → Promise<string>
 openPullRequest(env, target, head, base, title, body) → Promise<string>
 getDefaultBranch(env, repoUrl) → Promise<string>
 ```
+
+## Handling binary content
+
+`readFile` returns `{kind:'binary', mediaType, size, bytes}` for content classified as not text — detection is from the bytes themselves, never a file extension or declared content-type. `mediaType` is the detected format (or `application/octet-stream` when nothing matched), `size` is the byte length, `bytes` is a `Uint8Array` of the raw content. Only `fs` and `github` detect binary today; `gitlab` and `notion` always return `{kind:'found', ...}`. A handful of real formats (`BM`/bmp, `MZ`/PE, `ID3`/mp3, `OTTO`/otf, `OggS`/ogg, `fLaC`/flac, `wOFF`/`wOF2`, `GIF87a`/`GIF89a`, `%PDF-`, `ustar`/tar, and the RIFF-/`ftyp`-based signatures) are identified by printable-ASCII magic bytes that collide with ordinary text, so these count as binary only once the content also fails to decode as clean UTF-8 or carries a NUL byte early on — ordinary text starting with one of these strings still reads back as text. A UTF-8 BOM is stripped automatically; a UTF-16 BOM (`FF FE`/`FE FF`) decodes as text too, despite being full of NUL bytes. `fs`'s `isFresh` hashes the raw bytes directly, not a re-encoded decoded text — ordinary valid UTF-8 (BOM-prefixed or not) is unaffected, since the old and new hash are identical; a file 0.10.x decoded lossily (invalid UTF-8 or UTF-16, both previously force-decoded as UTF-8 with replacement characters) is what changes, comparing as not-fresh once. `github`'s `sha` is GitHub's own blob sha, untouched.
 
 ## Fork-pivot
 

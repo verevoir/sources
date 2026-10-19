@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { promises as fsPromises } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import {
   readFile,
   listFiles,
@@ -18,6 +19,14 @@ import { SourceApiError, type SourceEnv } from '../../src/index.js';
 
 const env: SourceEnv = { token: '', forkOrg: '' };
 
+/** sha256 hex prefix, matching shaOf's documented surrogate-sha format --
+ * not importing the internal helper, since this tests the externally
+ * observable hash a caller of isFresh would compute, not an
+ * implementation detail. */
+function hashOf(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex').slice(0, 40);
+}
+
 let root: string;
 
 beforeEach(async () => {
@@ -32,6 +41,7 @@ describe('readFile', () => {
   it('reads content + returns a content-derived sha', async () => {
     await fsPromises.writeFile(join(root, 'a.txt'), 'hello world\n', 'utf8');
     const result = await readFile(env, root, 'a.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
     expect(result.content).toBe('hello world\n');
     expect(result.sha).toMatch(/^[a-f0-9]{40}$/);
   });
@@ -52,6 +62,91 @@ describe('readFile', () => {
 
   it('refuses absolute paths', async () => {
     await expect(readFile(env, root, '/etc/passwd')).rejects.toBeInstanceOf(SourceApiError);
+  });
+
+  it('reads non-ASCII UTF-8 text byte-for-byte unchanged (binary detection does not touch real text)', async () => {
+    const text = 'héllo wörld — 日本語\n';
+    await fsPromises.writeFile(join(root, 'intl.txt'), text, 'utf8');
+    const result = await readFile(env, root, 'intl.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    expect(result.content).toBe(text);
+  });
+
+  it("gives kind 'binary' with mediaType image/png, the right size and identical bytes, for a PNG fixture", async () => {
+    const png = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+      0x52,
+    ]);
+    await fsPromises.writeFile(join(root, 'pic.png'), png);
+    const result = await readFile(env, root, 'pic.png');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('image/png');
+    expect(result.size).toBe(png.length);
+    expect(Buffer.from(result.bytes)).toEqual(png);
+  });
+
+  it("gives kind 'binary' with mediaType application/octet-stream for a NUL-containing non-image file", async () => {
+    const data = Buffer.concat([
+      Buffer.from('not an image'),
+      Buffer.from([0x00]),
+      Buffer.from('more'),
+    ]);
+    await fsPromises.writeFile(join(root, 'blob.dat'), data);
+    const result = await readFile(env, root, 'blob.dat');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('application/octet-stream');
+    expect(result.size).toBe(data.length);
+    expect(Buffer.from(result.bytes)).toEqual(data);
+  });
+
+  it('strips a UTF-8 BOM and returns the decoded text, not the BOM bytes', async () => {
+    const withBom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('hello', 'utf8')]);
+    await fsPromises.writeFile(join(root, 'bom.txt'), withBom);
+    const result = await readFile(env, root, 'bom.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    expect(result.content).toBe('hello');
+  });
+
+  it('decodes UTF-16LE with a BOM as text, even though the bytes are full of NUL', async () => {
+    const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('hello', 'utf16le')]);
+    await fsPromises.writeFile(join(root, 'utf16.txt'), utf16);
+    const result = await readFile(env, root, 'utf16.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    expect(result.content).toBe('hello');
+  });
+
+  it('gives binary octet-stream for invalid UTF-8 with no recognised signature and no NUL byte', async () => {
+    const invalid = Buffer.concat([
+      Buffer.from('plain text start, no signature here: '),
+      Buffer.from([0xc3, 0x28]),
+      Buffer.from(' more text after the bad byte'),
+    ]);
+    expect(invalid.includes(0x00)).toBe(false);
+    await fsPromises.writeFile(join(root, 'invalid.txt'), invalid);
+    const result = await readFile(env, root, 'invalid.txt');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('application/octet-stream');
+  });
+
+  it('reads ordinary text starting with a WEAK signature prefix ("BM") as text, unchanged', async () => {
+    const text = 'BMW notes on the quarterly report.\n';
+    await fsPromises.writeFile(join(root, 'weak.txt'), text, 'utf8');
+    const result = await readFile(env, root, 'weak.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    expect(result.content).toBe(text);
+  });
+
+  it('a WEAK signature match ("BM") whose content also fails the text floor (invalid UTF-8, no NUL) is binary, not text', async () => {
+    const fixture = Buffer.concat([
+      Buffer.from('BM', 'ascii'),
+      Buffer.from([0xc3, 0x28]),
+      Buffer.from('padding so this is not a tiny buffer', 'ascii'),
+    ]);
+    expect(fixture.includes(0x00)).toBe(false);
+    await fsPromises.writeFile(join(root, 'weak-invalid.dat'), fixture);
+    const result = await readFile(env, root, 'weak-invalid.dat');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('image/bmp');
   });
 });
 
@@ -151,15 +246,17 @@ describe('writeFile', () => {
 describe('isFresh', () => {
   it('returns true when version matches current content sha', async () => {
     await fsPromises.writeFile(join(root, 'a.txt'), 'hello', 'utf8');
-    const { sha } = await readFile(env, root, 'a.txt');
-    await expect(isFresh(env, root, 'a.txt', sha)).resolves.toBe(true);
+    const result = await readFile(env, root, 'a.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    await expect(isFresh(env, root, 'a.txt', result.sha)).resolves.toBe(true);
   });
 
   it('returns false when content has changed since the version was recorded', async () => {
     await fsPromises.writeFile(join(root, 'a.txt'), 'old', 'utf8');
-    const { sha: oldSha } = await readFile(env, root, 'a.txt');
+    const result = await readFile(env, root, 'a.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
     await fsPromises.writeFile(join(root, 'a.txt'), 'new', 'utf8');
-    await expect(isFresh(env, root, 'a.txt', oldSha)).resolves.toBe(false);
+    await expect(isFresh(env, root, 'a.txt', result.sha)).resolves.toBe(false);
   });
 
   it('returns false when the file no longer exists', async () => {
@@ -168,6 +265,30 @@ describe('isFresh', () => {
 
   it('refuses paths that escape the root', async () => {
     await expect(isFresh(env, root, '../escape.txt', 'sha')).rejects.toBeInstanceOf(SourceApiError);
+  });
+});
+
+describe('isFresh — BOM and binary content', () => {
+  it('BOM file: true for the recorded sha, false once the content changes', async () => {
+    const withBom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('hello', 'utf8')]);
+    await fsPromises.writeFile(join(root, 'bom2.txt'), withBom);
+    const result = await readFile(env, root, 'bom2.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    await expect(isFresh(env, root, 'bom2.txt', result.sha)).resolves.toBe(true);
+    await fsPromises.writeFile(
+      join(root, 'bom2.txt'),
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('changed', 'utf8')])
+    );
+    await expect(isFresh(env, root, 'bom2.txt', result.sha)).resolves.toBe(false);
+  });
+
+  it('binary file: true for its own hash, false once the bytes change (isFresh hashes raw bytes, not a decoded string)', async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    await fsPromises.writeFile(join(root, 'pic2.png'), png);
+    await expect(isFresh(env, root, 'pic2.png', hashOf(png))).resolves.toBe(true);
+    const changed = Buffer.concat([png, Buffer.from([0xff])]);
+    await fsPromises.writeFile(join(root, 'pic2.png'), changed);
+    await expect(isFresh(env, root, 'pic2.png', hashOf(png))).resolves.toBe(false);
   });
 });
 

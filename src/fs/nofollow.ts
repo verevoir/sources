@@ -46,12 +46,18 @@ export async function writeFileNoFollow(
 /** Read `abs` through an `O_NOFOLLOW` open: the read-side twin of
  * `writeFileNoFollow` (see the module header). Every symlink leaf is
  * refused, dangling or not. `ENOENT` is rethrown unwrapped so callers'
- * not-found mapping keeps working. Internal for the same reason: no containment of its own. */
+ * not-found mapping keeps working. Internal for the same reason: no
+ * containment of its own.
+ *
+ * Returns the RAW bytes (a `Buffer`), not a decoded string — the caller
+ * decides how to interpret them (UTF-8 text, or binary via
+ * `classifyFileContent` in `../binary.js`). Deciding that here would mean
+ * every caller gets a decode whether it wants one or not. */
 export async function readFileNoFollow(
   abs: string,
   verb: string,
   relativePath: string
-): Promise<string> {
+): Promise<Buffer> {
   let handle: Awaited<ReturnType<typeof fsPromises.open>>;
   try {
     handle = await fsPromises.open(abs, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
@@ -68,7 +74,7 @@ export async function readFileNoFollow(
     );
   }
   try {
-    return await handle.readFile('utf8');
+    return await handle.readFile();
   } finally {
     await handle.close();
   }

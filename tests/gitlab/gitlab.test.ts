@@ -135,7 +135,7 @@ describe('gitlab adapter — reads', () => {
       ],
     ]);
     const res = await gitlab.readFile(env, REPO, 'src/a.ts', 'dev');
-    expect(res).toEqual({ content: 'hello', sha: 'b1' });
+    expect(res).toEqual({ kind: 'found', content: 'hello', sha: 'b1' });
     // Authorization (not PRIVATE-TOKEN): fetch strips it on a cross-origin redirect.
     expect(calls[0].headers.Authorization).toBe('Bearer glpat-x');
     expect(calls[0].headers['PRIVATE-TOKEN']).toBeUndefined();
@@ -503,7 +503,7 @@ describe('gitlab adapter — rate limiting', () => {
     await vi.advanceTimersByTimeAsync(900);
     expect(calls).toHaveLength(1);
     // …then retried once it has.
-    await expect(settle(p)).resolves.toEqual({ content: 'ok', sha: 'b' });
+    await expect(settle(p)).resolves.toEqual({ kind: 'found', content: 'ok', sha: 'b' });
     expect(calls).toHaveLength(2);
   });
 
@@ -545,7 +545,7 @@ describe('gitlab adapter — rate limiting', () => {
     expect(calls).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(calls).toHaveLength(2);
-    await expect(p).resolves.toEqual({ content: 'ok', sha: 'b' });
+    await expect(p).resolves.toEqual({ kind: 'found', content: 'ok', sha: 'b' });
   });
 
   it('falls back to backoff when Retry-After is unparseable', async () => {

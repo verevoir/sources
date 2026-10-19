@@ -154,6 +154,7 @@ describe('readFile', () => {
     const { readFile } = await import('../../src/notion/index.js');
     const result = await readFile(ENV, ROOT_URL, '');
 
+    expect(result.kind).toBe('found');
     expect(result.sha).toBe('2026-05-24T12:00:00.000Z');
     expect(result.content).toBe('Hello world\n\nSecond paragraph\n');
   });
@@ -165,6 +166,7 @@ describe('readFile', () => {
     const { readFile } = await import('../../src/notion/index.js');
     const result = await readFile(ENV, ROOT_URL, '');
 
+    expect(result.kind).toBe('found');
     expect(result.content).toBe('');
     expect(result.sha).toBe('2026-05-24T12:00:00.000Z');
   });
