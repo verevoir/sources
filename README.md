@@ -229,10 +229,14 @@ change. UTF-16 content with a byte-order mark (`FF FE` / `FE FF`) decodes
 as text too — checked ahead of every signature, so it is never
 misclassified as binary despite being full of NUL bytes.
 
-`fs`'s `sha` (on a `'found'` result) and `isFresh` hash the file's raw
-bytes, not the decoded text. A `sha` held from a BOM-prefixed file read
-before this change will compare as not-fresh once; every other text file
-is unaffected. `github`'s `sha` is GitHub's own blob sha and is untouched.
+`fs`'s `isFresh` hashes the raw bytes directly, not a re-encoded decoded
+string. Ordinary valid UTF-8 — BOM-prefixed or not — is unaffected: the
+old and new hash are identical, since Node's decode keeps the BOM and
+re-encoding it loses nothing. A file 0.10.x decoded lossily (invalid
+UTF-8, or UTF-16, both force-decoded as UTF-8 with replacement characters
+before this change) is what changes — a `version` recorded for one of
+those will compare as not-fresh once. `github`'s `sha` is GitHub's own
+blob sha, untouched.
 
 ## Errors
 
