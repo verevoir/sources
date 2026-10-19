@@ -217,6 +217,36 @@ describe('classifyFileContent — WEAK signatures: ordinary text, not misclassif
   });
 });
 
+// ---------------------------------------------------------------------------
+// src/binary.ts:339-346 (the catch branch's own fall-through) was untested:
+// every weak-but-binary fixture above has a NUL, so classifyFileContent
+// never actually reaches this specific try/catch — it returns via the
+// hasNul branch instead, which skips the try entirely. These two fixtures
+// have NO NUL byte anywhere, so !hasNul is true, the TextDecoder throws on
+// invalid UTF-8, and the catch's own fall-through is what has to run.
+// ---------------------------------------------------------------------------
+describe('classifyFileContent — a WEAK match whose bytes are ALSO invalid UTF-8, with no NUL anywhere: the weak mediaType wins, not the generic octet-stream fallback', () => {
+  it('"BM" + an invalid UTF-8 continuation byte (0xC3 0x28), no NUL anywhere, is still image/bmp', () => {
+    const fixture = Buffer.concat([
+      Buffer.from('BM', 'ascii'),
+      Buffer.from([0xc3, 0x28]),
+      Buffer.from('padding so this is not a tiny buffer', 'ascii'),
+    ]);
+    expect(fixture.includes(0x00)).toBe(false);
+    expect(asBinary(classifyFileContent(fixture)).mediaType).toBe('image/bmp');
+  });
+
+  it('"ID3" + 0xFF 0xFE (0xFF is never a valid UTF-8 leading byte), no NUL anywhere, is still audio/mpeg', () => {
+    const fixture = Buffer.concat([
+      Buffer.from('ID3', 'ascii'),
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from('padding so this is not a tiny buffer', 'ascii'),
+    ]);
+    expect(fixture.includes(0x00)).toBe(false);
+    expect(asBinary(classifyFileContent(fixture)).mediaType).toBe('audio/mpeg');
+  });
+});
+
 describe('classifyFileContent — the text floor, and what must never be sniffed as binary', () => {
   it('treats plain ASCII text as text', () => {
     expect(asText(classifyFileContent(Buffer.from('hello world\n', 'utf8'))).content).toBe(
