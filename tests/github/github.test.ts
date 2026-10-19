@@ -182,6 +182,67 @@ describe('readFile', () => {
     expect(Buffer.from(result.bytes)).toEqual(data);
   });
 
+  it('strips a UTF-8 BOM and returns the decoded text, not the BOM bytes', async () => {
+    const withBom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('hello', 'utf8')]);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: withBom.toString('base64'), sha: 'bom-sha' },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'bom.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    expect(result.content).toBe('hello');
+  });
+
+  it('decodes UTF-16LE with a BOM as text, even though the bytes are full of NUL', async () => {
+    const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('hello', 'utf16le')]);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: utf16.toString('base64'), sha: 'u16-sha' },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'utf16.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    expect(result.content).toBe('hello');
+  });
+
+  it('gives binary octet-stream for invalid UTF-8 with no recognised signature and no NUL byte', async () => {
+    const invalid = Buffer.concat([
+      Buffer.from('plain text start, no signature here: '),
+      Buffer.from([0xc3, 0x28]),
+      Buffer.from(' more text after the bad byte'),
+    ]);
+    expect(invalid.includes(0x00)).toBe(false);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: invalid.toString('base64'), sha: 'inv-sha' },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'invalid.dat');
+    if (result.kind !== 'binary') throw new Error(`expected 'binary', got ${result.kind}`);
+    expect(result.mediaType).toBe('application/octet-stream');
+  });
+
+  it('reads ordinary text starting with a WEAK signature prefix ("BM") as text, unchanged', async () => {
+    const text = 'BMW notes on the quarterly report.\n';
+    scriptFetch([
+      {
+        status: 200,
+        body: {
+          type: 'file',
+          content: Buffer.from(text, 'utf8').toString('base64'),
+          sha: 'weak-sha',
+        },
+      },
+    ]);
+    const result = await readFile(env, 'foo/bar', 'weak.txt');
+    if (result.kind !== 'found') throw new Error(`expected 'found', got ${result.kind}`);
+    expect(result.content).toBe(text);
+  });
+
   it('reads non-ASCII UTF-8 text byte-for-byte unchanged (binary detection does not touch real text)', async () => {
     const text = 'héllo wörld — 日本語\n';
     scriptFetch([
@@ -239,6 +300,44 @@ describe('isFresh', () => {
     await expect(isFresh(env, 'foo/bar', 'README.md', 'sha', 'main')).rejects.toBeInstanceOf(
       SourceApiError
     );
+  });
+});
+
+describe('isFresh — BOM and binary content behave like any other file', () => {
+  it('BOM file: true for the recorded sha, false once GitHub reports it has moved', async () => {
+    const withBom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('hello', 'utf8')]);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: withBom.toString('base64'), sha: 'bom-sha-1' },
+      },
+    ]);
+    await expect(isFresh(env, 'foo/bar', 'bom.txt', 'bom-sha-1', 'main')).resolves.toBe(true);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: withBom.toString('base64'), sha: 'bom-sha-2' },
+      },
+    ]);
+    await expect(isFresh(env, 'foo/bar', 'bom.txt', 'bom-sha-1', 'main')).resolves.toBe(false);
+  });
+
+  it('binary file: true for the recorded sha, false once GitHub reports it has moved', async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: png.toString('base64'), sha: 'png-sha-1' },
+      },
+    ]);
+    await expect(isFresh(env, 'foo/bar', 'pic.png', 'png-sha-1', 'main')).resolves.toBe(true);
+    scriptFetch([
+      {
+        status: 200,
+        body: { type: 'file', content: png.toString('base64'), sha: 'png-sha-2' },
+      },
+    ]);
+    await expect(isFresh(env, 'foo/bar', 'pic.png', 'png-sha-1', 'main')).resolves.toBe(false);
   });
 });
 

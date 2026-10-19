@@ -18,7 +18,8 @@
 // are also ordinary English text: "BM" (bmp) opens "BMW notes"; "MZ" (the
 // DOS/PE header) opens "MZ, can you review this?"; "ID3" (mp3) opens "ID3
 // tags are a mess"; "OTTO" (otf), "OggS" (ogg), "fLaC" (flac), "wOFF"/"wOF2"
-// (woff/woff2), "GIF87a"/"GIF89a" and "%PDF-" have the same problem. A
+// (woff/woff2), "GIF87a"/"GIF89a", "%PDF-" and "ustar" (tar, at offset 257)
+// have the same problem. A
 // STRONG match (PNG's \x89, JPEG's FF D8 FF, gzip, ELF's \x7F, zip's
 // PK\x03\x04, sqlite's trailing \0, wasm's \0asm, ...) is binary
 // immediately — those byte sequences are not valid printable text to begin

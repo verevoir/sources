@@ -218,11 +218,16 @@ if (result.kind === 'binary') {
 
 A handful of real formats are identified by printable-ASCII magic bytes
 that collide with ordinary text (`BM`, `MZ`, `ID3`, `OTTO`, `OggS`, `fLaC`,
-`wOFF`/`wOF2`, `GIF87a`/`GIF89a`, `%PDF-`, and the RIFF- and `ftyp`-based
-signatures). These are trusted as binary only once the content also fails
-to decode as clean UTF-8 or contains a NUL byte early on — so ordinary text
-that happens to start with one of these strings (`"BMW notes"`, `"MZ, can
-you review this?"`) still reads back as text, losslessly.
+`wOFF`/`wOF2`, `GIF87a`/`GIF89a`, `%PDF-`, `ustar` (tar), and the RIFF- and
+`ftyp`-based signatures). These are trusted as binary only once the content
+also fails to decode as clean UTF-8 or contains a NUL byte early on — so
+ordinary text that happens to start with one of these strings (`"BMW
+notes"`, `"MZ, can you review this?"`) still reads back as text, losslessly.
+
+A UTF-8 byte-order mark is stripped automatically, same as before this
+change. UTF-16 content with a byte-order mark (`FF FE` / `FE FF`) decodes
+as text too — checked ahead of every signature, so it is never
+misclassified as binary despite being full of NUL bytes.
 
 ## Errors
 
