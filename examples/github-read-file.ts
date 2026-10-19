@@ -21,7 +21,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { content, sha } = await readFile(env, 'https://github.com/verevoir/llm', 'README.md');
+  const result = await readFile(env, 'https://github.com/verevoir/llm', 'README.md');
+  if (result.kind !== 'found') throw new Error(`README.md is ${result.kind}, not text`);
+  const { content, sha } = result;
 
   console.log(`Read README.md (sha=${sha}):`);
   console.log(content.slice(0, 200) + (content.length > 200 ? '...' : ''));

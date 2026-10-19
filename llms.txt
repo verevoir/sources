@@ -41,11 +41,13 @@ import { readFile, writeFile, openPullRequest } from '@verevoir/sources/github';
 const env = envFromProcessEnv();
 if (!env) throw new Error('GITHUB_TOKEN not set');
 
-const { content } = await readFile(
+const result = await readFile(
   env,
   'https://github.com/acme/charts',
   'README.md',
 );
+if (result.kind !== 'found') throw new Error(`README.md is ${result.kind}, not text`);
+const { content } = result;
 
 await writeFile(
   env,
@@ -69,7 +71,7 @@ const prUrl = await openPullRequest(
 ## The contract
 
 ```ts
-readFile(env, repoUrl, path, ref?) → Promise<{ content, sha }>
+readFile(env, repoUrl, path, ref?) → Promise<ReadFileResult>  // {kind:'found',content,sha} | {kind:'binary',mediaType,size,bytes}
 listFiles(env, repoUrl, prefix, ref?) → Promise<DirEntry[]>
 getRepoTree(env, repoUrl, ref?) → Promise<RepoTree>
 isFresh(env, repoUrl, path, version, ref?) → Promise<boolean>  // cheap "is held version still current?" check used by cache layers

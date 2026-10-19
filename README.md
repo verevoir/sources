@@ -87,7 +87,9 @@ const env = envFromProcessEnv({
 }) ?? { token: '', forkOrg: '' };
 
 const project = 'https://gitlab.com/acme/platform/charts';
-const { content } = await readFile(env, project, 'README.md');
+const result = await readFile(env, project, 'README.md');
+if (result.kind !== 'found') throw new Error(`README.md is ${result.kind}, not text`);
+const { content } = result;
 
 // One atomic commit — the commits API applies every action or none.
 await commitFiles(

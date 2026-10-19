@@ -28,7 +28,9 @@ async function main(): Promise<void> {
   const readmeEntry = blobs.find((e) => /^README/i.test(e.path.split('/').pop() ?? ''));
   if (readmeEntry) {
     console.log(`\nReading ${readmeEntry.path}…`);
-    const { content, sha } = await readFile(env, root, readmeEntry.path);
+    const result = await readFile(env, root, readmeEntry.path);
+    if (result.kind !== 'found') throw new Error(`${readmeEntry.path} is ${result.kind}, not text`);
+    const { content, sha } = result;
     console.log(`  sha (sha256 prefix): ${sha}`);
     console.log(
       `  content (first 200 chars): ${content.slice(0, 200)}${content.length > 200 ? '…' : ''}`
