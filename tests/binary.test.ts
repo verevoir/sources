@@ -281,3 +281,66 @@ describe('classifyFileContent — the text floor, and what must never be sniffed
     expect(asText(classifyFileContent(Buffer.alloc(0))).content).toBe('');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Untested guards inside the signature matchers themselves (matchFtyp,
+// zipFirstEntryName, matchMp3FrameSync) -- each asserts the REAL
+// fall-through classifyFileContent actually produces, not an assumption
+// about what it should produce.
+// ---------------------------------------------------------------------------
+describe('classifyFileContent — matchFtyp: an ftyp match too short to carry a brand', () => {
+  it('an ftyp box with "ftyp" present but fewer than 12 bytes total never matches avif/heic/quicktime/mp4, and falls through to the generic binary floor', () => {
+    // Bytes 4-7 are literally 'ftyp' (what matchAsciiAt checks), but the
+    // buffer is only 8 bytes long -- too short for the brand at bytes 8-11 --
+    // so matchFtyp's own `data.length < 12` guard must reject this for every
+    // brand, including the brand-less generic mp4 matcher.
+    const tooShort = Buffer.concat([
+      Buffer.from([0x00, 0x00, 0x00, 0x14]),
+      Buffer.from('ftyp', 'latin1'),
+    ]);
+    expect(tooShort.length).toBe(8);
+    expect(asBinary(classifyFileContent(tooShort)).mediaType).toBe('application/octet-stream');
+  });
+});
+
+describe('classifyFileContent — zipFirstEntryName: guards against reading past a short buffer', () => {
+  it('a zip signature with fewer than 30 bytes total (no room for the fixed local-file header) falls through to generic application/zip, never OOXML', () => {
+    const tooShortForHeader = Buffer.from([0x50, 0x4b, 0x03, 0x04]); // just the 4-byte signature
+    expect(asBinary(classifyFileContent(tooShortForHeader)).mediaType).toBe('application/zip');
+  });
+
+  it('nameLen === 0 in an otherwise-complete 30-byte header falls through to generic application/zip', () => {
+    const header = Buffer.alloc(30);
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(0, 26); // nameLen = 0
+    expect(asBinary(classifyFileContent(header)).mediaType).toBe('application/zip');
+  });
+
+  it('a promised entry-name length with NO name bytes at all (data.length < 30 + nameLen) falls through to generic application/zip', () => {
+    const header = Buffer.alloc(30); // exactly the fixed header, no name bytes follow
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(5, 26); // nameLen = 5, but nothing after byte 30
+    expect(asBinary(classifyFileContent(header)).mediaType).toBe('application/zip');
+  });
+
+  it('a zip truncated partway through its own promised entry name (some, but not all, name bytes present) falls through to generic application/zip', () => {
+    const header = Buffer.alloc(30);
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(10, 26); // nameLen = 10
+    const partialName = Buffer.from('wo', 'latin1'); // only 2 of the promised 10 bytes
+    const truncated = Buffer.concat([header, partialName]);
+    expect(asBinary(classifyFileContent(truncated)).mediaType).toBe('application/zip');
+  });
+});
+
+describe('classifyFileContent — matchMp3FrameSync: rejects a leading 0xFF that is not a real frame-sync byte', () => {
+  it('0xFF followed by a byte without the top 3 (0xE0) bits set is not an mp3 frame sync, and falls through to the generic binary floor', () => {
+    // 0x00 & 0xE0 === 0, not 0xE0, so matchMp3FrameSync's own bit check must
+    // reject this pair -- a real frame-sync second byte needs 0xE0-0xFF. The
+    // same 0x00 byte also puts this on the NUL floor, so the fall-through is
+    // deterministic rather than resting on UTF-8 validity.
+    const notAFrameSync = Buffer.from([0xff, 0x00, 0x00]);
+    expect((0x00 & 0xe0) === 0xe0).toBe(false); // documents exactly which check this exercises
+    expect(asBinary(classifyFileContent(notAFrameSync)).mediaType).toBe('application/octet-stream');
+  });
+});

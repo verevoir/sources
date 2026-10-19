@@ -510,3 +510,46 @@ describe('getRepoTree resolves the ref the same way its neighbours do', () => {
     await expect(getRepoTree(env, 'foo/bar', 'main')).rejects.toBeInstanceOf(SourceApiError);
   });
 });
+
+// fetchContentsMeta (the metadata-only GET behind isFresh and writeFile's
+// prior-sha lookup) has its own directory/type guards, identical in shape to
+// readFile's -- but reached through a different caller here, never readFile.
+describe('isFresh — fetchContentsMeta guards (reached through isFresh, not readFile)', () => {
+  it('throws, naming the path, when it resolves to a directory -- fetchContentsMeta rejects before isFresh ever compares a sha', async () => {
+    scriptFetch([{ status: 200, body: [] }]); // an array body means "this is a directory"
+    await expect(isFresh(env, 'foo/bar', 'src', 'whatever', 'main')).rejects.toThrow(
+      /src is a directory, not a file/
+    );
+  });
+
+  it('throws, naming the type, when it resolves to a non-file type (e.g. a submodule)', async () => {
+    scriptFetch([{ status: 200, body: { type: 'submodule', sha: 'sub-sha' } }]);
+    await expect(isFresh(env, 'foo/bar', 'vendor/lib', 'whatever', 'main')).rejects.toThrow(
+      /vendor\/lib is type=submodule, not a file/
+    );
+  });
+});
+
+describe('writeFile — fetchContentsMeta guards (reached through writeFile, not readFile)', () => {
+  it('throws, naming the path, when the target resolves to a directory, and never issues the PUT', async () => {
+    scriptFetch([
+      { status: 200, body: { object: { sha: 'x' } } }, // ensureBranch: branch exists
+      { status: 200, body: [] }, // fetchContentsMeta: directory
+    ]);
+    await expect(
+      writeFile(env, 'foo/bar', 'src', 'new content', 'aigency/TP-5', 'msg')
+    ).rejects.toThrow(/src is a directory, not a file/);
+    expect(calls).toHaveLength(2); // confirms the PUT (a 3rd call) never happened
+  });
+
+  it('throws, naming the type, when the target resolves to a non-file type, and never issues the PUT', async () => {
+    scriptFetch([
+      { status: 200, body: { object: { sha: 'x' } } },
+      { status: 200, body: { type: 'submodule', sha: 'sub-sha' } },
+    ]);
+    await expect(
+      writeFile(env, 'foo/bar', 'vendor/lib', 'new content', 'aigency/TP-5', 'msg')
+    ).rejects.toThrow(/vendor\/lib is type=submodule, not a file/);
+    expect(calls).toHaveLength(2);
+  });
+});
