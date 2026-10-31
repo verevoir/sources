@@ -34,6 +34,11 @@ describe('storageToMarkdown', () => {
     expect(storageToMarkdown(xhtml)).toBe('```js\nconst x = 1;\n```\n');
   });
 
+  it('renders a code macro with no language param and no plain-text-body as an empty fenced block', () => {
+    const xhtml = '<ac:structured-macro ac:name="code"></ac:structured-macro>';
+    expect(storageToMarkdown(xhtml)).toBe('```\n\n```\n');
+  });
+
   it('renders a bare pre block as a fenced code block', () => {
     expect(storageToMarkdown('<pre>line one\nline two</pre>')).toBe(
       '```\nline one\nline two\n```\n'
@@ -58,6 +63,12 @@ describe('storageToMarkdown', () => {
     );
   });
 
+  it('renders <b> and <i> as the same aliases as <strong> and <em>', () => {
+    expect(storageToMarkdown('<p><b>bold</b> and <i>italic</i></p>')).toBe(
+      '**bold** and *italic*\n'
+    );
+  });
+
   it('decodes basic XML entities in text', () => {
     expect(storageToMarkdown('<p>A &amp; B &lt;tag&gt;</p>')).toBe('A & B <tag>\n');
   });
@@ -78,6 +89,10 @@ describe('storageToMarkdown', () => {
 
   it('renders a horizontal rule', () => {
     expect(storageToMarkdown('<p>Before</p><hr/><p>After</p>')).toBe('Before\n\n---\n\nAfter\n');
+  });
+
+  it('renders a line break inline', () => {
+    expect(storageToMarkdown('<p>a<br/>b</p>')).toBe('a\nb\n');
   });
 
   it('renders a link with no href as plain text', () => {
@@ -273,6 +288,25 @@ describe('storageToMarkdown', () => {
     expect(storageToMarkdown('<p>&#x41;</p>')).toBe('A\n');
   });
 
+  it('keeps CDATA literal — never entity-decoded — even outside a code macro, inline', () => {
+    // The CDATA `raw` flag means "never decode entities", independent of
+    // WHERE the CDATA sits. A page author can put a CDATA section directly
+    // in prose, not only inside a macro's plain-text body.
+    expect(storageToMarkdown('<p><![CDATA[&lt;x&gt;]]></p>')).toBe('&lt;x&gt;\n');
+  });
+
+  it('keeps a block-level CDATA (no wrapping tag) literal too', () => {
+    expect(storageToMarkdown('<![CDATA[&lt;y&gt;]]>')).toBe('&lt;y&gt;\n');
+  });
+
+  it('passes an unrecognised block tag through to its children (e.g. <div>)', () => {
+    expect(storageToMarkdown('<div><p>inside div</p></div>')).toBe('inside div\n');
+  });
+
+  it('passes an unrecognised inline tag through to its children (e.g. <span>)', () => {
+    expect(storageToMarkdown('<p>a <span>b</span> c</p>')).toBe('a b c\n');
+  });
+
   it('falls back to "unknown" for a macro with no ac:name', () => {
     const xhtml = '<ac:structured-macro></ac:structured-macro>';
     const out = storageToMarkdown(xhtml);
@@ -289,5 +323,34 @@ describe('storageToMarkdown', () => {
     const huge = `<p>${'x'.repeat(2_500_000)}</p>`;
     const out = storageToMarkdown(huge);
     expect(out.length).toBeLessThan(huge.length);
+  });
+});
+
+describe('storageToMarkdown — the tokenizer scans linearly, not quadratically, on unclosed constructs', () => {
+  // Regression for a previously-quadratic tokenizer: a single alternated,
+  // lazily-quantified regex cost O(n^2) on repeated UNCLOSED CDATA/comment
+  // openers (200,000 characters measured at ~6s). The linear, indexOf-based
+  // scanner costs one forward scan per construct, so each of these finishes
+  // in well under a second even on 200,000 repeats — comfortably inside
+  // this file's own MAX_XHTML_LENGTH cap of 2,000,000 characters.
+  it('finishes quickly on 200k unclosed comment openers', () => {
+    const xhtml = '<!--'.repeat(200_000);
+    const start = Date.now();
+    expect(() => storageToMarkdown(xhtml)).not.toThrow();
+    expect(Date.now() - start).toBeLessThan(300);
+  });
+
+  it('finishes quickly on 200k unclosed CDATA openers', () => {
+    const xhtml = '<![CDATA['.repeat(200_000);
+    const start = Date.now();
+    expect(() => storageToMarkdown(xhtml)).not.toThrow();
+    expect(Date.now() - start).toBeLessThan(300);
+  });
+
+  it('finishes quickly on 200k unclosed tag openers', () => {
+    const xhtml = '<a'.repeat(200_000);
+    const start = Date.now();
+    expect(() => storageToMarkdown(xhtml)).not.toThrow();
+    expect(Date.now() - start).toBeLessThan(300);
   });
 });

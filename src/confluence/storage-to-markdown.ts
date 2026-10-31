@@ -76,10 +76,15 @@ const VOID_TAGS = new Set(['br', 'hr']);
 
 /** Hard cap on the XHTML body this converter will attempt to render. Past
  * it, the body is truncated and a note appended — a bounded, safe result
- * rather than unbounded work on an oversized page. This is independent of
- * (and in addition to) the response-size cap on the HTTP layer in
- * index.ts's confCall, which bounds what gets buffered off the wire before
- * it ever reaches this function. */
+ * rather than unbounded work on an oversized page. That guarantee is only
+ * as good as the WORK `parse()` below does per character: it scans
+ * linearly (see its own doc comment), so this cap actually bounds
+ * wall-clock cost, not just byte count. It did not, while the tokenizer was
+ * a backtracking regex with O(n^2) behaviour on pathological unclosed
+ * input — a well-formed-LOOKING body entirely within this cap could still
+ * cost minutes of CPU. This is independent of (and in addition to) the
+ * response-size cap on the HTTP layer in index.ts's confCall, which bounds
+ * what gets buffered off the wire before it ever reaches this function. */
 const MAX_XHTML_LENGTH = 2_000_000;
 
 /** Hard cap on recursive descent through the parsed tree (nested lists,
@@ -94,37 +99,88 @@ function tooDeep(depth: number): boolean {
 
 const DEPTH_PLACEHOLDER = '[content too deeply nested]';
 
-/** Tokenizes `xhtml` and parses it into a synthetic root element's children.
- * CDATA sections (macro bodies, typically) are captured as literal text,
- * never scanned for tags. Comments are dropped. An unmatched closing tag is
- * ignored rather than throwing — storage format from a real page is assumed
- * well-formed, and a converter should degrade, not crash, on the rest. This
- * is an explicit stack (not recursive), so an adversarially deep or wide
- * input cannot overflow the parser itself — only the RENDERER below, which
- * is depth-capped separately. */
+/** Tokenizes `xhtml` into a synthetic root element's children, scanning
+ * LINEARLY with `indexOf` rather than a backtracking regex. A prior version
+ * matched CDATA/comment/tag boundaries with one alternated, lazily-
+ * quantified regex (`/<!\[CDATA\[([\s\S]*?)\]\]>|<!--[\s\S]*?-->|<\/?[a-zA-Z][^>]*>/g`)
+ * — O(n^2) on repeated UNCLOSED constructs (measured: 200,000 characters of
+ * unclosed `<!--` took ~6 seconds; `MAX_XHTML_LENGTH`'s own 2,000,000-
+ * character cap would have cost minutes), which is exactly the
+ * attacker-controlled input this module's own header warns about. Each
+ * construct below costs exactly ONE `indexOf` scan of the remaining input:
+ * an unclosed CDATA section, comment, or tag is detected by a single failed
+ * `indexOf` — never retried at every position the way a backtracking regex
+ * would — and the remainder of the input is treated as plain text, which
+ * stops the scan. So a pathological unclosed construct costs this
+ * function's own linear budget exactly once, never more. CDATA sections are
+ * captured as literal text, never scanned for tags. A properly-closed
+ * comment is dropped; an unclosed one (like any other unclosed construct)
+ * becomes trailing text instead, since there is no well-defined boundary to
+ * recover one for. An unmatched closing tag is ignored rather than
+ * throwing — storage format from a real page is assumed well-formed, and a
+ * converter should degrade, not crash, on the rest. The element stack is
+ * explicit (not recursive), so an adversarially deep or wide input cannot
+ * overflow the parser itself — only the RENDERER below, which is
+ * depth-capped separately. */
 function parse(xhtml: string): Node[] {
   const root: ElNode = { kind: 'el', tag: '#root', attrs: {}, children: [] };
   const stack: ElNode[] = [root];
-  const re = /<!\[CDATA\[([\s\S]*?)\]\]>|<!--[\s\S]*?-->|<\/?[a-zA-Z][^>]*>/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
   const pushText = (text: string, raw: boolean) => {
     if (!text) return;
     stack[stack.length - 1].children.push({ kind: 'text', text, raw });
   };
-  while ((m = re.exec(xhtml))) {
-    if (m.index > last) pushText(xhtml.slice(last, m.index), false);
-    last = re.lastIndex;
-    const tok = m[0];
-    if (m[1] !== undefined) {
-      pushText(m[1], true);
-    } else if (tok.startsWith('<!--')) {
-      // comment — dropped
-    } else if (tok.startsWith('</')) {
+  const len = xhtml.length;
+  let i = 0;
+  while (i < len) {
+    const lt = xhtml.indexOf('<', i);
+    if (lt === -1) {
+      pushText(xhtml.slice(i), false);
+      break;
+    }
+    if (lt > i) pushText(xhtml.slice(i, lt), false);
+
+    if (xhtml.startsWith('<![CDATA[', lt)) {
+      const close = xhtml.indexOf(']]>', lt + 9);
+      if (close === -1) {
+        pushText(xhtml.slice(lt), false);
+        break;
+      }
+      pushText(xhtml.slice(lt + 9, close), true);
+      i = close + 3;
+      continue;
+    }
+
+    if (xhtml.startsWith('<!--', lt)) {
+      const close = xhtml.indexOf('-->', lt + 4);
+      if (close === -1) {
+        pushText(xhtml.slice(lt), false);
+        break;
+      }
+      i = close + 3;
+      continue;
+    }
+
+    const gt = xhtml.indexOf('>', lt + 1);
+    if (gt === -1) {
+      pushText(xhtml.slice(lt), false);
+      break;
+    }
+    const tok = xhtml.slice(lt, gt + 1);
+    if (!/^<\/?[a-zA-Z]/.test(tok)) {
+      // Not a tag opener at all (a bare '<' in prose, '<1', an untagged
+      // '<!...' outside CDATA/comment, ...) — emit the '<' as literal text
+      // and resume scanning right after it, exactly where the prior regex
+      // (which only matched `<\/?[a-zA-Z][^>]*>`) would have left it
+      // unmatched too.
+      pushText('<', false);
+      i = lt + 1;
+      continue;
+    }
+    if (tok.startsWith('</')) {
       const name = tok.slice(2, -1).trim().toLowerCase();
-      for (let i = stack.length - 1; i > 0; i--) {
-        if (stack[i].tag === name) {
-          stack.length = i;
+      for (let j = stack.length - 1; j > 0; j--) {
+        if (stack[j].tag === name) {
+          stack.length = j;
           break;
         }
       }
@@ -140,8 +196,8 @@ function parse(xhtml: string): Node[] {
       stack[stack.length - 1].children.push(el);
       if (!selfClosing && !VOID_TAGS.has(name)) stack.push(el);
     }
+    i = gt + 1;
   }
-  if (last < xhtml.length) pushText(xhtml.slice(last), false);
   return root.children;
 }
 
@@ -285,7 +341,7 @@ function renderInline(nodes: Node[], depth: number): string {
 }
 
 function renderInlineNode(n: Node, depth: number): string {
-  if (!isEl(n)) return escapeMarkdown(decodeEntities(n.text));
+  if (!isEl(n)) return escapeMarkdown(n.raw ? n.text : decodeEntities(n.text));
   switch (n.tag) {
     case 'br':
       return '\n';
@@ -426,7 +482,7 @@ function renderBlocks(nodes: Node[], depth: number): string {
 
 function renderBlock(n: Node, depth: number): string {
   if (!isEl(n)) {
-    const t = escapeMarkdown(decodeEntities(n.text)).trim();
+    const t = escapeMarkdown(n.raw ? n.text : decodeEntities(n.text)).trim();
     return t ? `${t}\n\n` : '';
   }
   switch (n.tag) {

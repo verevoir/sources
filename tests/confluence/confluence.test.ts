@@ -103,6 +103,15 @@ describe('confluence adapter — reads', () => {
     await expect(confluence.readFile(ENV, SPACE_URL, '')).rejects.toMatchObject({ status: 404 });
   });
 
+  it('treats "." and "/" as the space root too, same as an empty path', async () => {
+    await expect(confluence.readFile(ENV, SPACE_URL, '.')).rejects.toMatchObject({
+      status: 404,
+    });
+    await expect(confluence.readFile(ENV, SPACE_URL, '/')).rejects.toMatchObject({
+      status: 404,
+    });
+  });
+
   it('readFile rejects a non-numeric path segment (a title, not an id)', async () => {
     await expect(confluence.readFile(ENV, SPACE_URL, 'overview')).rejects.toThrow(/numeric/);
   });
@@ -118,6 +127,21 @@ describe('confluence adapter — reads', () => {
     const entries = await confluence.listFiles(ENV, SPACE_URL, '');
     expect(entries).toEqual([{ name: 'Home', type: 'dir', path: '1', sha: '2' }]);
     expect(calls.some((c) => c.url.includes('/spaces?keys=ENG'))).toBe(true);
+  });
+
+  it('listFiles treats "." and "/" as the space root prefix, same as empty', async () => {
+    stubFetch([
+      ['/wiki/api/v2/spaces?keys=ENG', () => [200, { results: [{ id: 's1' }] }]],
+      [
+        '/wiki/api/v2/spaces/s1/pages?limit=100',
+        () => [200, { results: [{ id: '1', title: 'Home', version: { number: 2 } }], _links: {} }],
+      ],
+    ]);
+    const viaDot = await confluence.listFiles(ENV, SPACE_URL, '.');
+    const viaSlash = await confluence.listFiles(ENV, SPACE_URL, '/');
+    const expected = [{ name: 'Home', type: 'dir', path: '1', sha: '2' }];
+    expect(viaDot).toEqual(expected);
+    expect(viaSlash).toEqual(expected);
   });
 
   it('listFiles follows cursor pagination via _links.next', async () => {
@@ -208,6 +232,11 @@ describe('confluence adapter — reads', () => {
 
   it('isFresh is false for the space root (it has no version of its own)', async () => {
     expect(await confluence.isFresh(ENV, SPACE_URL, '', '1')).toBe(false);
+  });
+
+  it('isFresh treats "." and "/" as the space root too', async () => {
+    expect(await confluence.isFresh(ENV, SPACE_URL, '.', '1')).toBe(false);
+    expect(await confluence.isFresh(ENV, SPACE_URL, '/', '1')).toBe(false);
   });
 
   it("getDefaultBranch returns 'live'", async () => {
@@ -436,6 +465,26 @@ describe('confluence adapter — rate limiting', () => {
     const p = confluence.readFile(ENV, SPACE_URL, '1');
     await vi.advanceTimersByTimeAsync(1500);
     expect(calls).toHaveLength(1);
+    await expect(settle(p)).resolves.toMatchObject({ content: 'ok\n' });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('clamps a large Retry-After to RATE_LIMIT_MAX_WAIT_MS rather than waiting the full requested delay', async () => {
+    // Retry-After: 100 (seconds) asks for a 100,000ms wait; the ceiling caps
+    // any one wait at RATE_LIMIT_MAX_WAIT_MS (30,000ms). Advancing only just
+    // past the ceiling — nowhere near the full 100s the header asked for —
+    // must already be enough to see the retry fire.
+    const page = { id: '1', version: { number: 1 }, body: { storage: { value: '<p>ok</p>' } } };
+    let n = 0;
+    const calls = stubFetch([
+      [
+        '/wiki/api/v2/pages/1?body-format=storage',
+        () => (++n === 1 ? [429, {}, { 'retry-after': '100' }] : [200, page]),
+      ],
+    ]);
+    vi.useFakeTimers();
+    const p = confluence.readFile(ENV, SPACE_URL, '1');
+    await vi.advanceTimersByTimeAsync(30_000);
     await expect(settle(p)).resolves.toMatchObject({ content: 'ok\n' });
     expect(calls).toHaveLength(2);
   });
