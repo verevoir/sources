@@ -266,7 +266,11 @@ function renderInlineNode(n: Node, depth: number): string {
       return '\n';
     case 'a': {
       const href = normalizeHref(n.attrs.href ?? '');
-      const label = escapeMarkdown(renderInline(n.children, depth + 1).trim());
+      // renderInline already escapes every leaf text node it descends into
+      // (renderInlineNode's default/text branch calls escapeMarkdown), so
+      // the label is single-escaped here, not re-escaped — wrapping it in
+      // a second escapeMarkdown would double every backslash it just added.
+      const label = renderInline(n.children, depth + 1).trim();
       if (href && isSafeHref(href)) return `[${label || href}](${formatHref(href)})`;
       return label;
     }
