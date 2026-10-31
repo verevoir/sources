@@ -176,8 +176,10 @@ const pages = await listFiles(env, space, '');
 
 // A page's body, converted from Confluence's storage-format XHTML to Markdown. Headings, lists,
 // tables, links and code blocks are preserved; an unrenderable macro becomes a named
-// `[macro: <name>]` placeholder rather than being silently dropped.
+// `[macro: <name>]` placeholder rather than being silently dropped. Same discriminated union as
+// GitHub/GitLab — narrow on `kind` before reading `content`.
 const page = await readFile(env, space, pages[0].path);
+if (page.kind !== 'found') throw new Error(`page is ${page.kind}, not text`);
 console.log(page.content);
 
 // 'live' — Confluence has no branch concept, like Notion.

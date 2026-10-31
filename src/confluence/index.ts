@@ -52,14 +52,34 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** 429 handling: retries, and the ceiling on any one wait. */
 const RATE_LIMIT_RETRIES = 3;
 const RATE_LIMIT_MAX_WAIT_MS = 30_000;
-/** Page cap + wall-clock budget for following `_links.next`, so a huge or
- * looping space cannot hang a caller forever — mirrors the GitLab adapter's
- * tree walk. */
+/** Page cap + wall-clock budget for following `_links.next` — scoped to a
+ * single TOP-LEVEL operation (one `listFiles` call, or the whole
+ * `getRepoTree` walk), not to one `confPages` call within it. A
+ * `PageBudget` is created once per top-level call and threaded down through
+ * every `listRootPages` / `listChildPages` / `confPages` call it makes, so
+ * a deep or wide space cannot hang a caller forever by spreading its cost
+ * across many per-node fetches that would otherwise each get a fresh
+ * budget of their own. */
 const MAX_LIST_PAGES = 500;
 const LIST_BUDGET_MS = 120_000;
 /** Cap on `getRepoTree`'s walk; past it the tree reports `truncated: true`,
  * matching the Notion adapter's own cap. */
 const DEFAULT_TREE_CAP = 5000;
+
+/** A page-fetch budget shared across every `confPages` call within one
+ * top-level operation. Mutated in place as pages are spent. */
+interface PageBudget {
+  deadline: number;
+  pagesUsed: number;
+}
+
+function newPageBudget(): PageBudget {
+  return { deadline: Date.now() + LIST_BUDGET_MS, pagesUsed: 0 };
+}
+
+function budgetExhausted(budget: PageBudget): boolean {
+  return budget.pagesUsed >= MAX_LIST_PAGES || Date.now() > budget.deadline;
+}
 
 /** Parses `https://<site>.atlassian.net/wiki/spaces/<SPACEKEY>[...]` into
  * the site origin + space key. Rejects anything else — this is also the
@@ -159,13 +179,19 @@ async function confCall<T>(env: SourceEnv, site: string, path: string): Promise<
 }
 
 /** Follows `_links.next` (origin-pinned by `confCall`) until it runs out, or
- * the page cap / time budget does. */
-async function confPages<T>(env: SourceEnv, site: string, first: string): Promise<T[]> {
-  const deadline = Date.now() + LIST_BUDGET_MS;
+ * the SHARED page cap / time budget does — `budget` is one `PageBudget` for
+ * the whole top-level operation, not a fresh one per call. */
+async function confPages<T>(
+  env: SourceEnv,
+  site: string,
+  first: string,
+  budget: PageBudget
+): Promise<T[]> {
   const items: T[] = [];
   let next: string | undefined = first;
-  for (let pages = 0; next; pages++) {
-    if (pages >= MAX_LIST_PAGES || Date.now() > deadline) break;
+  while (next) {
+    if (budgetExhausted(budget)) break;
+    budget.pagesUsed++;
     const data: Envelope<T> = await confCall<Envelope<T>>(env, site, next);
     items.push(...(data.results ?? []));
     next = data._links?.next;
@@ -209,19 +235,31 @@ async function resolveSpaceId(env: SourceEnv, site: string, spaceKey: string): P
   return id;
 }
 
-function listRootPages(env: SourceEnv, site: string, spaceId: string): Promise<ConfPage[]> {
+function listRootPages(
+  env: SourceEnv,
+  site: string,
+  spaceId: string,
+  budget: PageBudget
+): Promise<ConfPage[]> {
   return confPages<ConfPage>(
     env,
     site,
-    `/wiki/api/v2/spaces/${encodeURIComponent(spaceId)}/pages?limit=100`
+    `/wiki/api/v2/spaces/${encodeURIComponent(spaceId)}/pages?limit=100`,
+    budget
   );
 }
 
-function listChildPages(env: SourceEnv, site: string, pageId: string): Promise<ConfPage[]> {
+function listChildPages(
+  env: SourceEnv,
+  site: string,
+  pageId: string,
+  budget: PageBudget
+): Promise<ConfPage[]> {
   return confPages<ConfPage>(
     env,
     site,
-    `/wiki/api/v2/pages/${encodeURIComponent(pageId)}/children?limit=100`
+    `/wiki/api/v2/pages/${encodeURIComponent(pageId)}/children?limit=100`,
+    budget
   );
 }
 
@@ -287,10 +325,11 @@ export async function listFiles(
   void ref;
   const { site, spaceKey } = parseConfluenceSpaceUrl(repoUrl);
   const parentId = lastPageId(prefix);
+  const budget = newPageBudget();
   const children =
     parentId === null
-      ? await listRootPages(env, site, await resolveSpaceId(env, site, spaceKey))
-      : await listChildPages(env, site, parentId);
+      ? await listRootPages(env, site, await resolveSpaceId(env, site, spaceKey), budget)
+      : await listChildPages(env, site, parentId, budget);
   return children.map((c) => ({
     name: c.title,
     type: 'dir' as const,
@@ -300,11 +339,11 @@ export async function listFiles(
 }
 
 /** Walks the whole page tree under the space, breadth-first, capped at
- * `DEFAULT_TREE_CAP` entries (reported `truncated: true` past it). Every
- * page is a `blob` entry — matching the Notion adapter's RepoTree shape,
- * where the git-flavoured `tree` type is reserved for a non-page container
- * (Notion's child databases; Confluence has none, so this adapter never
- * emits one). */
+ * `DEFAULT_TREE_CAP` entries OR the shared `PageBudget` for the whole walk
+ * (reported `truncated: true` past either). Every page is a `blob` entry —
+ * matching the Notion adapter's RepoTree shape, where the git-flavoured
+ * `tree` type is reserved for a non-page container (Notion's child
+ * databases; Confluence has none, so this adapter never emits one). */
 export async function getRepoTree(
   env: SourceEnv,
   repoUrl: string,
@@ -313,19 +352,20 @@ export async function getRepoTree(
   void ref;
   const { site, spaceKey } = parseConfluenceSpaceUrl(repoUrl);
   const spaceId = await resolveSpaceId(env, site, spaceKey);
+  const budget = newPageBudget();
   const entries: TreeEntry[] = [];
   let truncated = false;
   const queue: Array<{ id: string | null; path: string }> = [{ id: null, path: '' }];
   while (queue.length > 0) {
-    if (entries.length >= DEFAULT_TREE_CAP) {
+    if (entries.length >= DEFAULT_TREE_CAP || budgetExhausted(budget)) {
       truncated = true;
       break;
     }
     const node = queue.shift()!;
     const children =
       node.id === null
-        ? await listRootPages(env, site, spaceId)
-        : await listChildPages(env, site, node.id);
+        ? await listRootPages(env, site, spaceId, budget)
+        : await listChildPages(env, site, node.id, budget);
     for (const child of children) {
       if (entries.length >= DEFAULT_TREE_CAP) {
         truncated = true;
@@ -338,6 +378,10 @@ export async function getRepoTree(
         sha: String(pageVersionNumber(child, 'getRepoTree')),
       });
       queue.push({ id: child.id, path: childPath });
+    }
+    if (budgetExhausted(budget)) {
+      truncated = true;
+      break;
     }
   }
   return { entries, truncated };

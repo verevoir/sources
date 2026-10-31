@@ -13,6 +13,19 @@
 // arbitrary macro's body would need a macro-specific renderer this module
 // does not have, and silently inlining raw macro markup would be worse than
 // naming what was skipped.
+//
+// This module's input is attacker-controlled — written by anyone who can
+// edit the page, not just the holder of the API token this adapter's own
+// index.ts guards so carefully — so two conversion boundaries are treated
+// as untrusted rather than passed through verbatim:
+//   - a link's `href` is allow-listed to http:, https:, mailto: and any
+//     relative / same-document link; anything else (javascript:, data:,
+//     ...) renders as plain label text, never a clickable destination.
+//   - a fenced code block's own fence (the `code` macro, and a bare `pre`)
+//     is sized longer than the longest run of backticks already present in
+//     the body, and a macro's `language` parameter is stripped to
+//     `[A-Za-z0-9_+-]` — so neither the body nor the language can break out
+//     of its own fence into the surrounding Markdown.
 
 interface ElNode {
   kind: 'el';
@@ -23,6 +36,10 @@ interface ElNode {
 interface TextNode {
   kind: 'text';
   text: string;
+  /** True for text captured from a CDATA section (a macro's plain-text
+   * body) — kept byte-for-byte literal. False for ordinary XHTML text,
+   * which is entity-escaped and must be decoded before use. */
+  raw: boolean;
 }
 type Node = ElNode | TextNode;
 
@@ -43,16 +60,16 @@ function parse(xhtml: string): Node[] {
   const re = /<!\[CDATA\[([\s\S]*?)\]\]>|<!--[\s\S]*?-->|<\/?[a-zA-Z][^>]*>/g;
   let last = 0;
   let m: RegExpExecArray | null;
-  const pushText = (text: string) => {
+  const pushText = (text: string, raw: boolean) => {
     if (!text) return;
-    stack[stack.length - 1].children.push({ kind: 'text', text });
+    stack[stack.length - 1].children.push({ kind: 'text', text, raw });
   };
   while ((m = re.exec(xhtml))) {
-    if (m.index > last) pushText(xhtml.slice(last, m.index));
+    if (m.index > last) pushText(xhtml.slice(last, m.index), false);
     last = re.lastIndex;
     const tok = m[0];
     if (m[1] !== undefined) {
-      pushText(m[1]);
+      pushText(m[1], true);
     } else if (tok.startsWith('<!--')) {
       // comment — dropped
     } else if (tok.startsWith('</')) {
@@ -76,7 +93,7 @@ function parse(xhtml: string): Node[] {
       if (!selfClosing && !VOID_TAGS.has(name)) stack.push(el);
     }
   }
-  if (last < xhtml.length) pushText(xhtml.slice(last));
+  if (last < xhtml.length) pushText(xhtml.slice(last), false);
   return root.children;
 }
 
@@ -90,12 +107,26 @@ function decodeEntities(s: string): string {
     .replace(/&amp;/g, '&');
 }
 
-/** Concatenates every descendant text node verbatim (no entity decoding) —
- * used for `pre` and macro plain-text bodies, where the CDATA content is the
- * literal text to keep, not markup to escape. */
-function rawText(n: Node): string {
-  if (!isEl(n)) return n.text;
-  return n.children.map(rawText).join('');
+/** Concatenates every descendant text node, decoding entities except in a
+ * CDATA-sourced node (`raw: true`), which stays byte-for-byte literal. Used
+ * for `pre` (ordinary entity-escaped text) and a macro's plain-text body
+ * (always CDATA in real storage format, so unaffected by the decode). */
+function textContent(n: Node): string {
+  if (!isEl(n)) return n.raw ? n.text : decodeEntities(n.text);
+  return n.children.map(textContent).join('');
+}
+
+/** Schemes a rendered link may point at. Anything else — `javascript:`,
+ * `data:`, `vbscript:`, ... — renders as plain label text instead of a
+ * clickable destination; a relative or same-document link (no scheme at
+ * all) is always allowed. */
+const SAFE_LINK_SCHEME_RE = /^(https?|mailto):/i;
+const URL_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+
+function isSafeHref(href: string): boolean {
+  if (!href) return false;
+  if (!URL_SCHEME_RE.test(href)) return true; // relative / same-document — no scheme
+  return SAFE_LINK_SCHEME_RE.test(href);
 }
 
 function renderInline(nodes: Node[]): string {
@@ -110,7 +141,8 @@ function renderInlineNode(n: Node): string {
     case 'a': {
       const href = n.attrs.href ?? '';
       const label = renderInline(n.children).trim();
-      return href ? `[${label || href}](${href})` : label;
+      if (href && isSafeHref(href)) return `[${label || href}](${href})`;
+      return label;
     }
     case 'strong':
     case 'b':
@@ -186,16 +218,34 @@ function macroParam(n: ElNode, name: string): string | undefined {
 
 function macroPlainTextBody(n: ElNode): string | undefined {
   for (const c of n.children) {
-    if (isEl(c) && c.tag === 'ac:plain-text-body') return rawText(c);
+    if (isEl(c) && c.tag === 'ac:plain-text-body') return textContent(c);
   }
   return undefined;
 }
 
+/** A fence of backticks strictly longer than the longest run already in
+ * `body` — so the body itself (however many consecutive backticks it
+ * contains) can never close the fence early. Never shorter than 3, the
+ * conventional minimum. */
+function fenceFor(body: string): string {
+  const runs = body.match(/`+/g) ?? [];
+  const longest = runs.reduce((max, run) => Math.max(max, run.length), 0);
+  return '`'.repeat(Math.max(3, longest + 1));
+}
+
+/** Strips a code-fence `language` tag to a safe, single-line token — no
+ * backtick, no newline, nothing that could itself break out of the fence
+ * it is about to be spliced onto. */
+function sanitizeLang(lang: string): string {
+  return lang.replace(/[^A-Za-z0-9_+-]/g, '');
+}
+
 function renderMacroBlock(n: ElNode): string {
   if (macroName(n) === 'code') {
-    const lang = macroParam(n, 'language') ?? '';
+    const lang = sanitizeLang(macroParam(n, 'language') ?? '');
     const body = (macroPlainTextBody(n) ?? '').replace(/\n+$/, '');
-    return '```' + lang + '\n' + body + '\n```\n\n';
+    const fence = fenceFor(body);
+    return `${fence}${lang}\n${body}\n${fence}\n\n`;
   }
   return `${macroPlaceholder(n)}\n\n`;
 }
@@ -226,8 +276,11 @@ function renderBlock(n: Node): string {
       return `${renderList(n, n.tag, 0)}\n\n`;
     case 'table':
       return `${renderTable(n)}\n`;
-    case 'pre':
-      return `\`\`\`\n${rawText(n).trim()}\n\`\`\`\n\n`;
+    case 'pre': {
+      const body = textContent(n).trim();
+      const fence = fenceFor(body);
+      return `${fence}\n${body}\n${fence}\n\n`;
+    }
     case 'hr':
       return '---\n\n';
     case 'ac:structured-macro':

@@ -412,4 +412,43 @@ describe('confluence adapter — tree walk truncation', () => {
     expect(tree.truncated).toBe(true);
     expect(tree.entries.length).toBe(5000);
   });
+
+  it('treats the page budget as shared across the WHOLE walk, not reset per node', async () => {
+    const calls = stubFetch([
+      ['/wiki/api/v2/spaces?keys=ENG', () => [200, { results: [{ id: 's1' }] }]],
+      [
+        '/wiki/api/v2/spaces/s1/pages?limit=100',
+        () => [
+          200,
+          { results: [{ id: '0', title: 'Page 0', version: { number: 1 } }], _links: {} },
+        ],
+      ],
+      [
+        '/children',
+        (call) => {
+          // Every /pages/{n}/children call returns exactly one child, n+1 — a
+          // single-child chain deep enough that, if the page budget reset on
+          // every node (one confPages call each), the walk would never stop
+          // on its own. It must stop because the budget is SHARED.
+          const m = call.url.match(/\/pages\/(\d+)\/children/);
+          const n = Number(m![1]);
+          return [
+            200,
+            {
+              results: [{ id: String(n + 1), title: `Page ${n + 1}`, version: { number: 1 } }],
+              _links: {},
+            },
+          ];
+        },
+      ],
+    ]);
+    const tree = await confluence.getRepoTree(ENV, SPACE_URL);
+    expect(tree.truncated).toBe(true);
+    // Stopped by the shared page budget (MAX_LIST_PAGES), nowhere near
+    // DEFAULT_TREE_CAP (5000) — proving the cap that fired is the walk-wide
+    // one, not a per-node one re-granted at every level.
+    expect(tree.entries.length).toBeGreaterThan(0);
+    expect(tree.entries.length).toBeLessThan(600);
+    expect(calls.length).toBeGreaterThan(100);
+  });
 });

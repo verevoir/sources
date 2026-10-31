@@ -92,4 +92,65 @@ describe('storageToMarkdown', () => {
   it('renders an empty string for a table with no rows', () => {
     expect(storageToMarkdown('<table></table>')).toBe('');
   });
+
+  it('renders only a safe link scheme (https) as a clickable destination', () => {
+    expect(storageToMarkdown('<p><a href="https://example.com">ok</a></p>')).toBe(
+      '[ok](https://example.com)\n'
+    );
+  });
+
+  it('renders a mailto: link as a clickable destination', () => {
+    expect(storageToMarkdown('<p><a href="mailto:a@example.com">mail</a></p>')).toBe(
+      '[mail](mailto:a@example.com)\n'
+    );
+  });
+
+  it('renders a relative link as a clickable destination (no scheme to allow-list)', () => {
+    expect(storageToMarkdown('<p><a href="/wiki/spaces/ENG/pages/123">rel</a></p>')).toBe(
+      '[rel](/wiki/spaces/ENG/pages/123)\n'
+    );
+  });
+
+  it('renders a javascript: link as plain label text, not a clickable destination', () => {
+    expect(storageToMarkdown('<p><a href="javascript:alert(1)">click</a></p>')).toBe('click\n');
+  });
+
+  it('renders a data: link as plain label text, not a clickable destination', () => {
+    expect(storageToMarkdown('<p><a href="data:text/html;base64,SGVsbG8=">click</a></p>')).toBe(
+      'click\n'
+    );
+  });
+
+  it('decodes XML entities inside a pre block — only a CDATA macro body stays literal', () => {
+    expect(storageToMarkdown('<pre>if (a &lt; b) { x = a &amp; b; }</pre>')).toBe(
+      '```\nif (a < b) { x = a & b; }\n```\n'
+    );
+  });
+
+  it('sizes the pre fence longer than the longest backtick run in its body', () => {
+    const xhtml = '<pre>````\nbreakout attempt\n````</pre>';
+    const out = storageToMarkdown(xhtml);
+    expect(out.startsWith('`````\n')).toBe(true);
+    expect(out).toContain('breakout attempt');
+    expect(out.trim().endsWith('`````')).toBe(true);
+  });
+
+  it('sizes the code-macro fence longer than the longest backtick run in its body', () => {
+    const xhtml =
+      '<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">js</ac:parameter>' +
+      '<ac:plain-text-body><![CDATA[````\nbreakout attempt\n````]]></ac:plain-text-body></ac:structured-macro>';
+    const out = storageToMarkdown(xhtml);
+    expect(out.startsWith('`````js\n')).toBe(true);
+    expect(out).toContain('breakout attempt');
+    expect(out.trim().endsWith('`````')).toBe(true);
+  });
+
+  it('sanitises a macro language param, stripping any newline or backtick breakout attempt', () => {
+    const xhtml =
+      '<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">js\n```evil</ac:parameter>' +
+      '<ac:plain-text-body><![CDATA[safe body]]></ac:plain-text-body></ac:structured-macro>';
+    const out = storageToMarkdown(xhtml);
+    expect(out.split('\n')[0]).toBe('```jsevil');
+    expect(out).toContain('safe body');
+  });
 });
