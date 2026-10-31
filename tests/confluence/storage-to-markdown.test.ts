@@ -65,4 +65,31 @@ describe('storageToMarkdown', () => {
   it('returns an empty string for empty input', () => {
     expect(storageToMarkdown('')).toBe('');
   });
+
+  it('drops an XHTML comment entirely', () => {
+    expect(storageToMarkdown('<p>Before</p><!-- a comment --><p>After</p>')).toBe(
+      'Before\n\nAfter\n'
+    );
+  });
+
+  it('ignores an unmatched closing tag rather than throwing', () => {
+    expect(storageToMarkdown('<p>Text</li></p>')).toBe('Text\n');
+  });
+
+  it('renders a horizontal rule', () => {
+    expect(storageToMarkdown('<p>Before</p><hr/><p>After</p>')).toBe('Before\n\n---\n\nAfter\n');
+  });
+
+  it('renders a link with no href as plain text', () => {
+    expect(storageToMarkdown('<p>See <a>here</a>.</p>')).toBe('See here.\n');
+  });
+
+  it('renders a table with no tbody (rows directly under table)', () => {
+    const xhtml = '<table><tr><th>A</th></tr><tr><td>1</td></tr></table>';
+    expect(storageToMarkdown(xhtml)).toBe('| A |\n| --- |\n| 1 |\n');
+  });
+
+  it('renders an empty string for a table with no rows', () => {
+    expect(storageToMarkdown('<table></table>')).toBe('');
+  });
 });

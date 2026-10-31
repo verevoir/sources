@@ -253,3 +253,163 @@ describe('confluence adapter — auth, not-found, and the token never leaking', 
     expect(calls).toHaveLength(0);
   });
 });
+
+describe('confluence adapter — malformed responses raise SourceApiError', () => {
+  it('listFiles names the space lookup when its results array is missing', async () => {
+    stubFetch([['/wiki/api/v2/spaces?keys=ENG', () => [200, {}]]]);
+    await expect(confluence.listFiles(ENV, SPACE_URL, '')).rejects.toThrow(
+      /malformed response \(missing results array\)/
+    );
+  });
+
+  it('listFiles throws a named not-found when the space key resolves to no results', async () => {
+    stubFetch([['/wiki/api/v2/spaces?keys=ENG', () => [200, { results: [] }]]]);
+    await expect(confluence.listFiles(ENV, SPACE_URL, '')).rejects.toMatchObject({
+      message: 'Confluence space not found: ENG',
+      status: 404,
+    });
+  });
+
+  it('readFile names itself when the page response is missing version.number', async () => {
+    const malformed = { id: '1', body: { storage: { value: '<p>x</p>' } } };
+    stubFetch([['/wiki/api/v2/pages/1?body-format=storage', () => [200, malformed]]]);
+    await expect(confluence.readFile(ENV, SPACE_URL, '1')).rejects.toThrow(
+      /readFile: malformed page response \(missing version\.number\)/
+    );
+  });
+
+  it('isFresh names itself when the page response is missing version.number', async () => {
+    stubFetch([['/wiki/api/v2/pages/1', () => [200, { id: '1' }]]]);
+    await expect(confluence.isFresh(ENV, SPACE_URL, '1', '1')).rejects.toThrow(
+      /isFresh: malformed page response \(missing version\.number\)/
+    );
+  });
+
+  it('listFiles names itself when a child page is missing version.number', async () => {
+    stubFetch([
+      [
+        '/wiki/api/v2/pages/1/children?limit=100',
+        () => [200, { results: [{ id: '2', title: 'Child' }], _links: {} }],
+      ],
+    ]);
+    await expect(confluence.listFiles(ENV, SPACE_URL, '1')).rejects.toThrow(
+      /listFiles: malformed page response \(missing version\.number\)/
+    );
+  });
+
+  it('getRepoTree names itself when a page in the tree is missing version.number', async () => {
+    stubFetch([
+      ['/wiki/api/v2/spaces?keys=ENG', () => [200, { results: [{ id: 's1' }] }]],
+      [
+        '/wiki/api/v2/spaces/s1/pages?limit=100',
+        () => [200, { results: [{ id: '1', title: 'Home' }], _links: {} }],
+      ],
+    ]);
+    await expect(confluence.getRepoTree(ENV, SPACE_URL)).rejects.toThrow(
+      /getRepoTree: malformed page response \(missing version\.number\)/
+    );
+  });
+});
+
+describe('confluence adapter — the token never leaves the space’s own origin', () => {
+  it('refuses a pagination link to another host instead of following it', async () => {
+    const calls = stubFetch([
+      ['/wiki/api/v2/spaces?keys=ENG', () => [200, { results: [{ id: 's1' }] }]],
+      [
+        '/wiki/api/v2/spaces/s1/pages?limit=100',
+        () => [
+          200,
+          {
+            results: [{ id: '1', title: 'A', version: { number: 1 } }],
+            _links: { next: 'https://exfil.example/steal' },
+          },
+        ],
+      ],
+    ]);
+    await expect(confluence.listFiles(ENV, SPACE_URL, '')).rejects.toThrow(/cross-origin/);
+    expect(calls.map((c) => new URL(c.url).host)).toEqual([
+      'adsurg.atlassian.net',
+      'adsurg.atlassian.net',
+    ]);
+  });
+});
+
+describe('confluence adapter — timeouts', () => {
+  it('reports a timed-out request as a SourceApiError naming the path', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw Object.assign(new Error('The operation was aborted due to timeout'), {
+          name: 'TimeoutError',
+        });
+      })
+    );
+    await expect(confluence.readFile(ENV, SPACE_URL, '1')).rejects.toThrow(/timed out/);
+  });
+
+  it('propagates a non-timeout network failure unchanged (not dressed up as a timeout)', async () => {
+    const refused = Object.assign(new TypeError('fetch failed'), {
+      cause: { code: 'ECONNREFUSED' },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw refused;
+      })
+    );
+    await expect(confluence.readFile(ENV, SPACE_URL, '1')).rejects.toBe(refused);
+  });
+
+  it('bounds each request with an abort signal', async () => {
+    const calls: RequestInit[] = [];
+    const page = { id: '1', version: { number: 1 }, body: { storage: { value: '<p>x</p>' } } };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_u: string, init: RequestInit) => {
+        calls.push(init);
+        return Response.json(page);
+      })
+    );
+    await confluence.readFile(ENV, SPACE_URL, '1');
+    expect(calls[0].signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+describe('confluence adapter — rate limiting', () => {
+  it('honours a Retry-After HTTP-date', async () => {
+    const page = { id: '1', version: { number: 1 }, body: { storage: { value: '<p>ok</p>' } } };
+    let n = 0;
+    const calls = stubFetch([
+      [
+        '/wiki/api/v2/pages/1?body-format=storage',
+        () =>
+          ++n === 1
+            ? [429, {}, { 'retry-after': new Date(Date.now() + 3000).toUTCString() }]
+            : [200, page],
+      ],
+    ]);
+    vi.useFakeTimers();
+    const p = confluence.readFile(ENV, SPACE_URL, '1');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(calls).toHaveLength(1);
+    await expect(settle(p)).resolves.toMatchObject({ content: 'ok\n' });
+    expect(calls).toHaveLength(2);
+  });
+});
+
+describe('confluence adapter — tree walk truncation', () => {
+  it('getRepoTree truncates at DEFAULT_TREE_CAP, reporting truncated: true', async () => {
+    const manyPages = Array.from({ length: 5001 }, (_, i) => ({
+      id: String(i),
+      title: `Page ${i}`,
+      version: { number: 1 },
+    }));
+    stubFetch([
+      ['/wiki/api/v2/spaces?keys=ENG', () => [200, { results: [{ id: 's1' }] }]],
+      ['/wiki/api/v2/spaces/s1/pages?limit=100', () => [200, { results: manyPages, _links: {} }]],
+    ]);
+    const tree = await confluence.getRepoTree(ENV, SPACE_URL);
+    expect(tree.truncated).toBe(true);
+    expect(tree.entries.length).toBe(5000);
+  });
+});

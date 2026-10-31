@@ -180,12 +180,30 @@ interface ConfPage {
   body?: { storage?: { value: string } };
 }
 
+/** Validates the `version.number` shape the Confluence API guarantees,
+ * raising a SourceApiError naming what was malformed rather than letting a
+ * malformed-but-200 response crash every caller with a raw TypeError. */
+function pageVersionNumber(page: ConfPage, context: string): number {
+  const n = page?.version?.number;
+  if (typeof n !== 'number') {
+    throw new SourceApiError(
+      `Confluence ${context}: malformed page response (missing version.number)`
+    );
+  }
+  return n;
+}
+
 async function resolveSpaceId(env: SourceEnv, site: string, spaceKey: string): Promise<string> {
-  const data = await confCall<{ results: { id: string }[] }>(
+  const data = await confCall<{ results?: { id: string }[] }>(
     env,
     site,
     `/wiki/api/v2/spaces?keys=${encodeURIComponent(spaceKey)}`
   );
+  if (!Array.isArray(data.results)) {
+    throw new SourceApiError(
+      `Confluence space lookup for "${spaceKey}": malformed response (missing results array)`
+    );
+  }
   const id = data.results[0]?.id;
   if (!id) throw new SourceApiError(`Confluence space not found: ${spaceKey}`, 404);
   return id;
@@ -252,7 +270,7 @@ export async function readFile(
   }
   const page = await getPage(env, site, pageId, true);
   const content = storageToMarkdown(page.body?.storage?.value ?? '');
-  return { kind: 'found', content, sha: String(page.version.number) };
+  return { kind: 'found', content, sha: String(pageVersionNumber(page, 'readFile')) };
 }
 
 /** Lists the immediate children of `prefix` — root-level pages of the space
@@ -277,7 +295,7 @@ export async function listFiles(
     name: c.title,
     type: 'dir' as const,
     path: parentId === null ? c.id : `${parentId}/${c.id}`,
-    sha: String(c.version.number),
+    sha: String(pageVersionNumber(c, 'listFiles')),
   }));
 }
 
@@ -314,7 +332,11 @@ export async function getRepoTree(
         break;
       }
       const childPath = node.path ? `${node.path}/${child.id}` : child.id;
-      entries.push({ path: childPath, type: 'blob', sha: String(child.version.number) });
+      entries.push({
+        path: childPath,
+        type: 'blob',
+        sha: String(pageVersionNumber(child, 'getRepoTree')),
+      });
       queue.push({ id: child.id, path: childPath });
     }
   }
@@ -339,7 +361,7 @@ export async function isFresh(
   if (pageId === null) return false;
   try {
     const page = await getPage(env, site, pageId, false);
-    return String(page.version.number) === version;
+    return String(pageVersionNumber(page, 'isFresh')) === version;
   } catch (err) {
     if (err instanceof SourceApiError && err.status === 404) return false;
     throw err;
