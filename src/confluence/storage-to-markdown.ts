@@ -35,6 +35,10 @@
 //     metacharacters (`\`, `` ` ``, `[`, `]`, `(`, `)`, `!`) escaped, so
 //     page content cannot forge its own markdown link — through a label,
 //     or through plain prose that was never inside a real `<a>` tag at all.
+//     An anchor with no rendered label (e.g. a self-closing `<a href=.../>`)
+//     falls back to the href itself as the label; that fallback is escaped
+//     too, so an href crafted to look like `x](z)[click](javascript:...)`
+//     cannot forge a second link merely by omitting its own label text.
 //     A code span or fenced block's own content stays literal by design
 //     (guarded instead by fence sizing, below), since escaping inside code
 //     would corrupt it.
@@ -292,7 +296,16 @@ function renderInlineNode(n: Node, depth: number): string {
       // the label is single-escaped here, not re-escaped — wrapping it in
       // a second escapeMarkdown would double every backslash it just added.
       const label = renderInline(n.children, depth + 1).trim();
-      if (href && isSafeHref(href)) return `[${label || href}](${formatHref(href)})`;
+      // An anchor with no rendered text (e.g. a self-closing <a href=.../>)
+      // falls back to the href itself as the label. That fallback is NOT
+      // exempt from escaping: href has only passed normalizeHref (entity
+      // decode + control-char strip) and isSafeHref's scheme-prefix check,
+      // neither of which inspects the rest of the string — without this,
+      // an href like 'https://good.example/x](z)[click](javascript:...)'
+      // would inject raw, unescaped markdown-link syntax as label text.
+      if (href && isSafeHref(href)) {
+        return `[${label || escapeMarkdown(href)}](${formatHref(href)})`;
+      }
       return label;
     }
     case 'strong':

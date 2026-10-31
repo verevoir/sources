@@ -200,6 +200,38 @@ describe('storageToMarkdown', () => {
     expect(out).toBe('text\n');
   });
 
+  it('treats a query-string colon as safe/relative, not a scheme separator', () => {
+    const xhtml = '<p><a href="page?x=1:2">rel</a></p>';
+    const out = storageToMarkdown(xhtml);
+    expect(out).toBe('[rel](page?x=1:2)\n');
+  });
+
+  it('rejects a scheme whose colon precedes every special character, even with a path after it', () => {
+    const xhtml = '<p><a href="javascript:void(0)/x">click</a></p>';
+    const out = storageToMarkdown(xhtml);
+    expect(out).toBe('click\n');
+  });
+
+  it('escapes the href-as-label fallback for an empty-label anchor, closing a markdown-injection path', () => {
+    const href = 'https://good.example/x](z)[click](javascript:alert(1))';
+    const xhtml = `<p><a href="${href}"/></p>`;
+    const out = storageToMarkdown(xhtml);
+    const ESCAPE_CHARS = '\\`[]()!';
+    const escapedHref = href
+      .split('')
+      .map((c) => (ESCAPE_CHARS.includes(c) ? `\\${c}` : c))
+      .join('');
+    const PERCENT_ENCODE: Record<string, string> = {
+      ' ': '%20',
+      '(': '%28',
+      ')': '%29',
+      '<': '%3C',
+      '>': '%3E',
+    };
+    const encodedHref = href.replace(/[ ()<>]/g, (c) => PERCENT_ENCODE[c]);
+    expect(out).toBe(`[${escapedHref}](${encodedHref})\n`);
+  });
+
   it('escapes markdown syntax forged through a link label', () => {
     const label = 'x](javascript:alert(1)';
     const xhtml = `<p>See <a href="https://safe.example">${label}</a> ok</p>`;

@@ -147,6 +147,23 @@ describe('confluence adapter — reads', () => {
     expect(entries).toEqual([{ name: 'Child', type: 'dir', path: '1/2', sha: '3' }]);
   });
 
+  it('listFiles builds a child path from the FULL prefix chain, not just the immediate parent', async () => {
+    // prefix '100/200', child '300' must come back as '100/200/300' — the
+    // '100' ancestor must not be dropped just because only '200' (the last
+    // segment) was needed to decide which /children call to make.
+    stubFetch([
+      [
+        '/wiki/api/v2/pages/200/children?limit=100',
+        () => [
+          200,
+          { results: [{ id: '300', title: 'Grandchild', version: { number: 1 } }], _links: {} },
+        ],
+      ],
+    ]);
+    const entries = await confluence.listFiles(ENV, SPACE_URL, '100/200');
+    expect(entries).toEqual([{ name: 'Grandchild', type: 'dir', path: '100/200/300', sha: '1' }]);
+  });
+
   it('getRepoTree walks the hierarchy breadth-first, marking every page a blob', async () => {
     stubFetch([
       ['/wiki/api/v2/spaces?keys=ENG', () => [200, { results: [{ id: 's1' }] }]],
@@ -382,6 +399,27 @@ describe('confluence adapter — timeouts', () => {
 });
 
 describe('confluence adapter — rate limiting', () => {
+  it('backs off on a negative Retry-After instead of retrying at once', async () => {
+    // Date.parse('-5') is the year 2001 — in the past — so the bug this
+    // regresses would compute a zero (immediate) wait. The signed-number
+    // guard must reject -5 as an invalid delay-seconds value and fall back
+    // to exponential backoff (attempt 0 => ~1000ms) instead.
+    const page = { id: '1', version: { number: 1 }, body: { storage: { value: '<p>ok</p>' } } };
+    let n = 0;
+    const calls = stubFetch([
+      [
+        '/wiki/api/v2/pages/1?body-format=storage',
+        () => (++n === 1 ? [429, {}, { 'retry-after': '-5' }] : [200, page]),
+      ],
+    ]);
+    vi.useFakeTimers();
+    const p = confluence.readFile(ENV, SPACE_URL, '1');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(calls).toHaveLength(1); // not retried yet — proves it backed off
+    await expect(settle(p)).resolves.toMatchObject({ content: 'ok\n' });
+    expect(calls).toHaveLength(2);
+  });
+
   it('honours a Retry-After HTTP-date', async () => {
     const page = { id: '1', version: { number: 1 }, body: { storage: { value: '<p>ok</p>' } } };
     let n = 0;
@@ -483,6 +521,67 @@ describe('confluence adapter — oversized / malformed pagination', () => {
     await expect(confluence.listFiles(ENV, SPACE_URL, '')).rejects.toThrow(
       /unparseable pagination link/
     );
+  });
+
+  it("refuses an oversized bodyless response through readBounded's res.text() fallback", async () => {
+    // A Response with no streaming body at all (res.body === null) falls
+    // through to the `!res.body` branch in readBounded, which must enforce
+    // the same cap via res.text().length — not just the declared-header or
+    // streaming-reader branches exercised by the other two size-cap tests.
+    const CAP_BYTES = 20 * 1024 * 1024;
+    const bigText = 'a'.repeat(CAP_BYTES + 1);
+    const fakeResponse = {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      body: null,
+      text: async () => bigText,
+    } as unknown as Response;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => fakeResponse)
+    );
+    await expect(confluence.readFile(ENV, SPACE_URL, '1')).rejects.toThrow(/too large/);
+  });
+
+  it("reads a small bodyless response successfully through the same res.text() fallback", async () => {
+    const page = { id: '1', version: { number: 1 }, body: { storage: { value: '<p>ok</p>' } } };
+    const fakeResponse = {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      body: null,
+      text: async () => JSON.stringify(page),
+    } as unknown as Response;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => fakeResponse)
+    );
+    await expect(confluence.readFile(ENV, SPACE_URL, '1')).resolves.toMatchObject({
+      content: 'ok\n',
+    });
+  });
+});
+
+describe('confluence adapter — ref is accepted and ignored, like Notion', () => {
+  it('readFile, listFiles, getRepoTree and isFresh all succeed unchanged when a non-empty ref is passed', async () => {
+    const page = { id: '1', version: { number: 1 }, body: { storage: { value: '<p>x</p>' } } };
+    stubFetch([
+      ['/wiki/api/v2/pages/1?body-format=storage', () => [200, page]],
+      ['/wiki/api/v2/pages/1', () => [200, { id: '1', version: { number: 1 } }]],
+      ['/wiki/api/v2/spaces?keys=ENG', () => [200, { results: [{ id: 's1' }] }]],
+      ['/wiki/api/v2/spaces/s1/pages?limit=100', () => [200, { results: [], _links: {} }]],
+    ]);
+    const ref = 'some-branch-or-version';
+    await expect(confluence.readFile(ENV, SPACE_URL, '1', ref)).resolves.toMatchObject({
+      kind: 'found',
+    });
+    await expect(confluence.listFiles(ENV, SPACE_URL, '', ref)).resolves.toEqual([]);
+    await expect(confluence.getRepoTree(ENV, SPACE_URL, ref)).resolves.toEqual({
+      entries: [],
+      truncated: false,
+    });
+    await expect(confluence.isFresh(ENV, SPACE_URL, '1', '1', ref)).resolves.toBe(true);
   });
 });
 

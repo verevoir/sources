@@ -139,8 +139,13 @@ function retryDelay(res: Response, attempt: number): number {
   const header = res.headers.get('retry-after');
   let wait = 2 ** attempt * 1000;
   if (header) {
-    if (/^\s*\d+(\.\d+)?\s*$/.test(header)) {
-      wait = Number(header) * 1000;
+    // A numeric value is delay-seconds; a negative one is invalid and falls
+    // back to backoff. Only a non-numeric value is an HTTP-date — Date.parse
+    // would otherwise read "-5" as the year 2001 and retry at once. Mirrors
+    // src/gitlab/index.ts's retryDelay exactly.
+    if (/^\s*-?\d+(\.\d+)?\s*$/.test(header)) {
+      const secs = Number(header);
+      if (secs >= 0) wait = secs * 1000;
     } else {
       const date = Date.parse(header);
       if (!Number.isNaN(date)) wait = Math.max(0, date - Date.now());
@@ -391,7 +396,12 @@ export async function readFile(
  * when `prefix` is empty, else the children of the last page id in the
  * chain. Every entry is surfaced as `dir`: any page may itself have
  * children, so (as the Notion adapter does, for the same reason) a leaf vs.
- * branch distinction is not drawn at listing time. */
+ * branch distinction is not drawn at listing time. Each child's own `path`
+ * is the FULL `prefix` chain plus the child id — e.g. a `prefix` of
+ * `100/200` returns children at `100/200/300`, not `200/300` — matching
+ * `getRepoTree`'s full-chain contract and the fs/Notion adapters' own
+ * `prefix ? \`${prefix}/${child}\` : child` pattern, not just the immediate
+ * parent id used below to decide which API call to make. */
 export async function listFiles(
   env: SourceEnv,
   repoUrl: string,
@@ -401,6 +411,7 @@ export async function listFiles(
   void ref;
   const { site, spaceKey } = parseConfluenceSpaceUrl(repoUrl);
   const parentId = lastPageId(prefix);
+  const normalizedPrefix = prefix.trim().replace(/^\/+|\/+$/g, '');
   const budget = newPageBudget();
   const children =
     parentId === null
@@ -409,7 +420,7 @@ export async function listFiles(
   return children.map((c) => ({
     name: c.title,
     type: 'dir' as const,
-    path: parentId === null ? c.id : `${parentId}/${c.id}`,
+    path: parentId === null ? c.id : `${normalizedPrefix}/${c.id}`,
     sha: String(pageVersionNumber(c, 'listFiles')),
   }));
 }
