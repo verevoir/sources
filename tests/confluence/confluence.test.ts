@@ -544,7 +544,7 @@ describe('confluence adapter — oversized / malformed pagination', () => {
     await expect(confluence.readFile(ENV, SPACE_URL, '1')).rejects.toThrow(/too large/);
   });
 
-  it("reads a small bodyless response successfully through the same res.text() fallback", async () => {
+  it('reads a small bodyless response successfully through the same res.text() fallback', async () => {
     const page = { id: '1', version: { number: 1 }, body: { storage: { value: '<p>ok</p>' } } };
     const fakeResponse = {
       ok: true,
