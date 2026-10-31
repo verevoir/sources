@@ -8,11 +8,18 @@
 // the input is a fixed, documented grammar rather than arbitrary HTML.
 //
 // Renders headings, (nested) lists, simple tables, links, bold/italic,
-// inline code, bare `pre` blocks and the `code` macro as a fenced block. Any
-// OTHER macro is dropped with a `[macro: <name>]` placeholder — rendering an
-// arbitrary macro's body would need a macro-specific renderer this module
-// does not have, and silently inlining raw macro markup would be worse than
-// naming what was skipped.
+// inline code and bare `pre` blocks. A macro (`ac:structured-macro`) is
+// handled differently depending on WHERE it sits, because a fenced code
+// block is a block-level construct that cannot be spliced into running
+// prose: in BLOCK context (a macro as a direct child of the document, a
+// list item, a table cell, ...) the `code` macro renders as a fenced block,
+// and any OTHER macro is dropped with a `[macro: <name>]` placeholder. In
+// INLINE context — a macro nested inside a `<p>`, a link label, or anywhere
+// else reached through the inline renderer — EVERY macro, `code` included,
+// renders as that same `[macro: <name>]` placeholder; rendering an arbitrary
+// macro's body would need a macro-specific renderer this module does not
+// have, and silently inlining raw macro markup would be worse than naming
+// what was skipped.
 //
 // This module's input is attacker-controlled — written by anyone who can
 // edit the page, not just the holder of the API token this adapter's own

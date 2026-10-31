@@ -104,6 +104,20 @@ describe('storageToMarkdown', () => {
     expect(storageToMarkdown(xhtml)).toBe('| A |\n| --- |\n| 1 |\n');
   });
 
+  it('escapes a literal pipe in a table cell, and collapses an embedded newline to a space', () => {
+    // renderTable's renderCell deliberately escapes '|' (which would
+    // otherwise split the cell into two columns of the generated
+    // '| ... | ... |' syntax) and collapses an embedded newline (which
+    // would otherwise break the single-line row the table syntax requires)
+    // to a single space.
+    const xhtml =
+      '<table><tr><th>H</th></tr><tr><td>a|b</td></tr>' +
+      '<tr><td>line one\nline two</td></tr></table>';
+    expect(storageToMarkdown(xhtml)).toBe(
+      '| H |\n| --- |\n| a\\|b |\n| line one line two |\n'
+    );
+  });
+
   it('renders an empty string for a table with no rows', () => {
     expect(storageToMarkdown('<table></table>')).toBe('');
   });
@@ -329,6 +343,21 @@ describe('storageToMarkdown', () => {
     const xhtml = '<ac:structured-macro></ac:structured-macro>';
     const out = storageToMarkdown(xhtml);
     expect(out).toBe('[macro: unknown]\n');
+  });
+
+  it('renders a macro nested INLINE (inside a paragraph) as a placeholder, even the code macro', () => {
+    // renderBlock's 'ac:structured-macro' case checks macroName(n) === 'code'
+    // and fences it; renderInlineNode's case does not — any macro reached
+    // through the inline path (nested inside a <p>, alongside text) always
+    // placeholders, code included. This pins that deliberate fork so a
+    // regression that accidentally routed an inline code macro through the
+    // block renderer (or vice-versa) would be caught.
+    const xhtml =
+      '<p>see <ac:structured-macro ac:name="code"><ac:plain-text-body>' +
+      '<![CDATA[x]]></ac:plain-text-body></ac:structured-macro> here</p>';
+    const out = storageToMarkdown(xhtml);
+    expect(out).toContain('[macro: code]');
+    expect(out).not.toContain('```');
   });
 
   it('caps rendering recursion depth, degrading to a placeholder', () => {
