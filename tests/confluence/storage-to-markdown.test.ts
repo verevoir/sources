@@ -2,6 +2,20 @@ import { describe, it, expect } from 'vitest';
 import { storageToMarkdown, _parseStepsForTest } from '../../src/confluence/storage-to-markdown.js';
 
 describe('storageToMarkdown', () => {
+  it('renders plain text with no markup at all (the tokenizer\'s terminal branch fires on the first iteration)', () => {
+    // parse()'s main loop: `const lt = xhtml.indexOf('<', i); if (lt === -1) { ... break; }`
+    // -- with no '<' anywhere in the input, that branch fires immediately.
+    expect(storageToMarkdown('plain text')).toBe('plain text\n');
+  });
+
+  it('renders trailing text after the last tag closes (the same terminal branch, mid-scan)', () => {
+    // After '<p>a</p>' is consumed, the scanner resumes past position i with
+    // no further '<' in the rest of the input, so the identical `lt === -1`
+    // branch fires a second time -- here mid-scan rather than on the first
+    // iteration -- pushing 'tail' as a final text node.
+    expect(storageToMarkdown('<p>a</p>tail')).toBe('a\n\ntail\n');
+  });
+
   it('renders headings', () => {
     expect(storageToMarkdown('<h1>Title</h1><h2>Sub</h2>')).toBe('# Title\n\n## Sub\n');
   });

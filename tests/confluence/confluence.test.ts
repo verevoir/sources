@@ -610,6 +610,31 @@ describe('confluence adapter — oversized / malformed pagination', () => {
       content: 'ok\n',
     });
   });
+
+  it("falls back to an empty error detail when a 500 response's detail body exceeds the cap", async () => {
+    // confCall's non-OK branch reads at most MAX_ERROR_DETAIL_BYTES (65,536)
+    // bytes of the body for a truncated error detail, via
+    // `readBounded(...).then(...).catch(() => '')` -- any failure reading
+    // that detail (oversized here, or a streaming error) is swallowed to an
+    // empty string rather than masking the real HTTP status with an
+    // unrelated "response too large" error.
+    const ERROR_DETAIL_CAP = 65_536;
+    const fakeResponse = {
+      ok: false,
+      status: 500,
+      headers: { get: () => null },
+      body: null,
+      text: async () => 'x'.repeat(ERROR_DETAIL_CAP + 1),
+    } as unknown as Response;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => fakeResponse)
+    );
+    await expect(confluence.readFile(ENV, SPACE_URL, '1')).rejects.toMatchObject({
+      status: 500,
+      detail: '',
+    });
+  });
 });
 
 describe('confluence adapter — ref is accepted and ignored, like Notion', () => {
