@@ -76,15 +76,8 @@ describe('parseConfluenceSpaceUrl', () => {
 
 describe('confluence adapter — reads', () => {
   it('readFile resolves the page, converts the storage body, and sends Basic auth', async () => {
-    const calls = stubFetch([
-      [
-        '/wiki/api/v2/pages/123?body-format=storage',
-        () => [
-          200,
-          { id: '123', version: { number: 4 }, body: { storage: { value: '<p>Hi</p>' } } },
-        ],
-      ],
-    ]);
+    const page = { id: '123', version: { number: 4 }, body: { storage: { value: '<p>Hi</p>' } } };
+    const calls = stubFetch([['/wiki/api/v2/pages/123?body-format=storage', () => [200, page]]]);
     const res = await confluence.readFile(ENV, SPACE_URL, '123');
     expect(res).toEqual({ kind: 'found', content: 'Hi\n', sha: '4' });
     expect(calls[0].headers.Authorization).toBe(
@@ -93,15 +86,8 @@ describe('confluence adapter — reads', () => {
   });
 
   it('readFile resolves the LAST id of a page-id chain', async () => {
-    stubFetch([
-      [
-        '/wiki/api/v2/pages/456?body-format=storage',
-        () => [
-          200,
-          { id: '456', version: { number: 1 }, body: { storage: { value: '<p>x</p>' } } },
-        ],
-      ],
-    ]);
+    const page = { id: '456', version: { number: 1 }, body: { storage: { value: '<p>x</p>' } } };
+    stubFetch([['/wiki/api/v2/pages/456?body-format=storage', () => [200, page]]]);
     await expect(confluence.readFile(ENV, SPACE_URL, '123/456')).resolves.toMatchObject({
       sha: '1',
     });
@@ -129,22 +115,15 @@ describe('confluence adapter — reads', () => {
   });
 
   it('listFiles follows cursor pagination via _links.next', async () => {
+    const pageA = {
+      results: [{ id: '1', title: 'A', version: { number: 1 } }],
+      _links: { next: '/wiki/api/v2/spaces/s1/pages?cursor=abc&limit=100' },
+    };
+    const pageB = { results: [{ id: '2', title: 'B', version: { number: 1 } }], _links: {} };
     const calls = stubFetch([
       ['/wiki/api/v2/spaces?keys=ENG', () => [200, { results: [{ id: 's1' }] }]],
-      [
-        '/wiki/api/v2/spaces/s1/pages?limit=100',
-        () => [
-          200,
-          {
-            results: [{ id: '1', title: 'A', version: { number: 1 } }],
-            _links: { next: '/wiki/api/v2/spaces/s1/pages?cursor=abc&limit=100' },
-          },
-        ],
-      ],
-      [
-        '/wiki/api/v2/spaces/s1/pages?cursor=abc',
-        () => [200, { results: [{ id: '2', title: 'B', version: { number: 1 } }], _links: {} }],
-      ],
+      ['/wiki/api/v2/spaces/s1/pages?limit=100', () => [200, pageA]],
+      ['/wiki/api/v2/spaces/s1/pages?cursor=abc', () => [200, pageB]],
     ]);
     const entries = await confluence.listFiles(ENV, SPACE_URL, '');
     expect(entries.map((e) => e.name)).toEqual(['A', 'B']);
@@ -236,17 +215,12 @@ describe('confluence adapter — auth, not-found, and the token never leaking', 
   });
 
   it('retries a 429 honouring Retry-After, then succeeds', async () => {
+    const page = { id: '1', version: { number: 1 }, body: { storage: { value: '<p>ok</p>' } } };
     let n = 0;
     const calls = stubFetch([
       [
         '/wiki/api/v2/pages/1?body-format=storage',
-        () =>
-          ++n === 1
-            ? [429, {}, { 'retry-after': '1' }]
-            : [
-                200,
-                { id: '1', version: { number: 1 }, body: { storage: { value: '<p>ok</p>' } } },
-              ],
+        () => (++n === 1 ? [429, {}, { 'retry-after': '1' }] : [200, page]),
       ],
     ]);
     vi.useFakeTimers();

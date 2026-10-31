@@ -166,7 +166,7 @@ async function confPages<T>(env: SourceEnv, site: string, first: string): Promis
   let next: string | undefined = first;
   for (let pages = 0; next; pages++) {
     if (pages >= MAX_LIST_PAGES || Date.now() > deadline) break;
-    const data = await confCall<Envelope<T>>(env, site, next);
+    const data: Envelope<T> = await confCall<Envelope<T>>(env, site, next);
     items.push(...(data.results ?? []));
     next = data._links?.next;
   }

@@ -156,10 +156,11 @@ function renderTable(n: ElNode): string {
   if (rows.length === 0) return '';
   const cellsOf = (row: ElNode): ElNode[] =>
     row.children.filter((c): c is ElNode => isEl(c) && (c.tag === 'td' || c.tag === 'th'));
-  const renderRow = (cells: ElNode[]) =>
-    `| ${cells
-      .map((c) => renderInline(c.children).trim().replace(/\|/g, '\\|').replace(/\s*\n+\s*/g, ' '))
-      .join(' | ')} |`;
+  const renderCell = (c: ElNode): string => {
+    const text = renderInline(c.children).trim();
+    return text.replace(/\|/g, '\\|').replace(/\s*\n+\s*/g, ' ');
+  };
+  const renderRow = (cells: ElNode[]): string => `| ${cells.map(renderCell).join(' | ')} |`;
   const header = cellsOf(rows[0]);
   const lines = [renderRow(header), `| ${header.map(() => '---').join(' | ')} |`];
   for (const row of rows.slice(1)) lines.push(renderRow(cellsOf(row)));
