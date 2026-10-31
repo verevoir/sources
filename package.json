@@ -26,6 +26,10 @@
     "./notion": {
       "types": "./dist/notion/index.d.ts",
       "import": "./dist/notion/index.js"
+    },
+    "./confluence": {
+      "types": "./dist/confluence/index.d.ts",
+      "import": "./dist/confluence/index.js"
     }
   },
   "files": [
