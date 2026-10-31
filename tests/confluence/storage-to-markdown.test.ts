@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { storageToMarkdown, _parseStepsForTest } from '../../src/confluence/storage-to-markdown.js';
 
 describe('storageToMarkdown', () => {
-  it('renders plain text with no markup at all (the tokenizer\'s terminal branch fires on the first iteration)', () => {
+  it("renders plain text with no markup at all (the tokenizer's terminal branch fires on the first iteration)", () => {
     // parse()'s main loop: `const lt = xhtml.indexOf('<', i); if (lt === -1) { ... break; }`
     // -- with no '<' anywhere in the input, that branch fires immediately.
     expect(storageToMarkdown('plain text')).toBe('plain text\n');
