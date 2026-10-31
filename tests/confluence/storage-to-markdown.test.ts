@@ -182,10 +182,16 @@ describe('storageToMarkdown', () => {
     expect(out).toBe('click\n');
   });
 
-  it('wraps a link destination with a paren in angle brackets', () => {
+  it('percent-encodes a paren in a link destination rather than wrapping it', () => {
     const xhtml = '<p><a href="https://example.com/a)b">x</a></p>';
     const out = storageToMarkdown(xhtml);
-    expect(out).toBe('[x](<https://example.com/a)b>)\n');
+    expect(out).toBe('[x](https://example.com/a%29b)\n');
+  });
+
+  it('percent-encodes a literal angle bracket in a link destination, reachable via entity decoding', () => {
+    const xhtml = '<p><a href="https://example.com/a&gt;b">x</a></p>';
+    const out = storageToMarkdown(xhtml);
+    expect(out).toBe('[x](https://example.com/a%3Eb)\n');
   });
 
   it('treats a single-quoted href as absent (fails safe)', () => {

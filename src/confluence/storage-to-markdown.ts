@@ -25,8 +25,11 @@
 //     (javascript:, data:, a control-character- or entity-obfuscated
 //     scheme, ...) renders as plain label text, never a clickable
 //     destination. A destination containing a character that would break
-//     the `(...)` syntax (a space, paren or angle bracket) is wrapped in
-//     angle brackets, CommonMark's own escape for exactly that.
+//     the `(...)` syntax (a space, paren or literal angle bracket) is
+//     percent-encoded rather than angle-bracket-wrapped — CommonMark's own
+//     `<...>`-delimited destination syntax forbids an unescaped `<`/`>`
+//     INSIDE it, so wrapping would not escape a destination that itself
+//     contains one.
 //   - every other piece of rendered TEXT (headings, paragraphs, list items,
 //     table cells, link labels) has CommonMark's own link/image/code
 //     metacharacters (`\`, `` ` ``, `[`, `]`, `(`, `)`, `!`) escaped, so
@@ -247,11 +250,29 @@ function isSafeHref(href: string): boolean {
   return specialIdx !== -1 && colonIdx > specialIdx;
 }
 
-/** Wraps a link destination in angle brackets — CommonMark's own escape —
- * when it contains a character (space, paren, angle bracket) that would
- * otherwise prematurely close the `(...)` destination syntax. */
+/** Percent-encodes the characters in a link destination that would
+ * otherwise prematurely close CommonMark's `(...)` destination syntax —
+ * space, `(`, `)`, `<`, `>`. Percent-encoding, not angle-bracket wrapping:
+ * CommonMark's own `<...>`-delimited destination syntax forbids an
+ * unescaped `<` or `>` INSIDE it, so wrapping a destination that itself
+ * contains a literal `<`/`>` (reachable here via entity decoding, which
+ * runs before this) does not escape it — it produces an invalid,
+ * ambiguous destination that a real CommonMark parser mis-splits into an
+ * autolink plus leaked literal text. Percent-encoding has no such caveat:
+ * it is always valid inside a URL, and none of these characters is ever
+ * meaningful there. */
+const HREF_PERCENT_ENCODE: Record<string, string> = {
+  ' ': '%20',
+  '(': '%28',
+  ')': '%29',
+  '<': '%3C',
+  '>': '%3E',
+};
+
 function formatHref(href: string): string {
-  return /[\s()<>]/.test(href) ? `<${href}>` : href;
+  let out = '';
+  for (const ch of href) out += HREF_PERCENT_ENCODE[ch] ?? ch;
+  return out;
 }
 
 function renderInline(nodes: Node[], depth: number): string {

@@ -234,7 +234,9 @@ tree**, which is whatever is checked out, so it cannot: a **non-empty `ref`
 throws `SourceApiError`** rather than quietly answering about the checkout. An
 absent or empty ref means "current" and is the normal case. Notion still
 **accepts and ignores** a ref — the same silent substitution, not yet fixed
-there, and stated here rather than papered over.
+there, and stated here rather than papered over. Confluence does the same —
+it **accepts and ignores** a ref, like Notion — because Confluence pages have
+no branch concept to resolve one against.
 
 `isFresh` answers "is the `version` I'm holding still the live one for `(repoUrl, path, ref)`?" — the cheap freshness check cache layers (`@verevoir/context`'s `wrapWithCache`) use to validate held entries without re-fetching content. Returns `false` when the source has moved (including when the path no longer resolves).
 

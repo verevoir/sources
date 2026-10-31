@@ -446,6 +446,26 @@ describe('confluence adapter — oversized / malformed pagination', () => {
     await expect(confluence.readFile(ENV, SPACE_URL, '1')).rejects.toThrow(/too large/);
   });
 
+  it('refuses an oversized response via the streaming byte count, not a declared Content-Length', async () => {
+    // Mirrors index.ts's own MAX_RESPONSE_BYTES (20 MiB). No content-length
+    // header at all, so the declared-Content-Length fast path cannot fire —
+    // only the streaming byte-count loop inside readBounded can catch this.
+    const CAP_BYTES = 20 * 1024 * 1024;
+    const CHUNK = new Uint8Array(1024 * 1024).fill(97);
+    const chunkCount = Math.floor(CAP_BYTES / CHUNK.byteLength) + 1; // 1 MiB past the cap
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < chunkCount; i++) controller.enqueue(CHUNK);
+        controller.close();
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(stream, { status: 200 }))
+    );
+    await expect(confluence.readFile(ENV, SPACE_URL, '1')).rejects.toThrow(/too large/);
+  });
+
   it('names an unparseable pagination link rather than throwing a raw TypeError', async () => {
     stubFetch([
       ['/wiki/api/v2/spaces?keys=ENG', () => [200, { results: [{ id: 's1' }] }]],
