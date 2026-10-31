@@ -21,6 +21,7 @@ Direct in-process consumption (the usage shown below) is for: writing your own M
 - `@verevoir/sources/gitlab` — GitLab REST v4 adapter (gitlab.com and self-hosted). Native `fetch`, no SDK dependency. `openPullRequest` opens a merge request.
 - `@verevoir/sources/fs` — local filesystem adapter. `repoUrl` is a local directory path. No auth, no API. Reads/lists/walks/writes; fork + PR throw 501 (not applicable to a local filesystem).
 - `@verevoir/sources/notion` — Notion adapter via `@notionhq/client` (optional peer dep). Models a Notion workspace as a documentation tree: pages are files, child pages are subdirectories, content is the page's blocks rendered to Markdown. Ships a minimal Markdown↔blocks converter for round-tripping aigency-generated content; rich Notion features (tables, callouts, etc.) read as best-effort placeholders.
+- `@verevoir/sources/confluence` — Confluence Cloud adapter, **read-only**: `readFile`, `listFiles`, `getRepoTree`, `isFresh`, `getDefaultBranch` only — no write methods, and so no `SourceAdapter`-typed aggregate export (that interface requires the write half). Native `fetch`, no SDK dependency. `repoUrl` is a space URL, `https://<site>.atlassian.net/wiki/spaces/<SPACEKEY>`; `path` is a slash-separated chain of page IDs — stable, unlike titles, which are mutable and not unique within a space. `readFile` converts the page's storage-format XHTML body to Markdown via a small dependency-free converter (headings, lists, tables, links, code preserved; an unrenderable macro becomes a named `[macro: <name>]` placeholder rather than being silently dropped). `getDefaultBranch` returns `'live'`, like Notion.
 
 Future adapters land alongside (`@verevoir/sources/bitbucket`, `@verevoir/sources/s3`) under the same contract.
 
@@ -148,6 +149,44 @@ await writeFile(
 ```
 
 `ensureFork` and `openPullRequest` throw 501 on the FS adapter — there's no local-FS equivalent. The customer manages git operations themselves.
+
+## Canonical usage — Confluence
+
+Read-only: this adapter exports `readFile`, `listFiles`, `getRepoTree`, `isFresh` and
+`getDefaultBranch` only — no `writeFile` / `commitFiles` / `ensureBranch` / `ensureFork` /
+`openPullRequest`, so there is no `SourceAdapter`-typed aggregate export here (that interface
+requires the write half).
+
+`repoUrl` names the site and space: `https://<site>.atlassian.net/wiki/spaces/<SPACEKEY>`. `path`
+is a slash-separated chain of page IDs — stable identifiers, never page titles, which are mutable
+and not unique within a space.
+
+```ts
+import { readFile, listFiles, getDefaultBranch } from '@verevoir/sources/confluence';
+
+// SourceEnv.token is "<email>:<api_token>" — an Atlassian API token from
+// https://id.atlassian.com/manage-profile/security/api-tokens — sent as HTTP Basic auth.
+// Never logged, never interpolated into a thrown error.
+const env = { token: 'ada@example.com:ATATT3xFfGF0...', forkOrg: '' };
+
+const space = 'https://acme.atlassian.net/wiki/spaces/ENG';
+
+// Root-level pages of the space.
+const pages = await listFiles(env, space, '');
+
+// A page's body, converted from Confluence's storage-format XHTML to Markdown.
+const page = await readFile(env, space, pages[0].path);
+console.log(page.content); // headings, lists, tables, links and code blocks preserved;
+                            // an unrenderable macro becomes a named `[macro: <name>]` placeholder
+                            // rather than being silently dropped.
+
+await getDefaultBranch(env, space); // 'live' — Confluence has no branch concept, like Notion.
+```
+
+Only `https://*.atlassian.net` is accepted — refused before any request, so the token is never
+sent anywhere else even on a prompt-injected `repoUrl`. `sha` (from `readFile`, compared by
+`isFresh`) is the page's `version.number` as a string. 429s retry per `Retry-After` (seconds or an
+HTTP-date), bounded and jittered.
 
 ## Fork-pivot pattern
 

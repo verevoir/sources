@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.0 — 2026-10-31
+
+- **New: `@verevoir/sources/confluence`** — read-only SourceAdapter implementation over Confluence Cloud's REST v2 API with native `fetch` (no SDK). Implements `readFile` / `listFiles` / `getRepoTree` / `isFresh` / `getDefaultBranch` only — Confluence has no git-shaped branch/commit/fork/PR model, so (unlike Notion, which implements all ten and no-ops/throws on the ones that don't apply) this adapter ships no write methods and no `SourceAdapter`-typed aggregate export at all.
+- `repoUrl` is a space URL, `https://<site>.atlassian.net/wiki/spaces/<SPACEKEY>`; `path` is a slash-separated chain of page IDs — stable, unlike page titles, which are mutable and not unique within a space. Pages and children are fetched via `/wiki/api/v2/spaces?keys=`, `/spaces/{id}/pages`, `/pages/{id}/children`, `/pages/{id}?body-format=storage`, paginated via `_links.next`. `sha` is the page's `version.number` as a string; `isFresh` does one bodyless GET and compares it. `getDefaultBranch` returns `'live'`, like Notion.
+- **New: a dependency-free storage-format XHTML → Markdown converter** (`storageToMarkdown`), used by `readFile`. Renders headings, nested lists, simple tables, links, bold/italic, inline code, bare `pre` blocks and the `code` macro as a fenced block; any other macro renders as a named `[macro: <name>]` placeholder rather than being silently dropped.
+- Auth is Atlassian Cloud Basic auth: `SourceEnv.token` carries `"<email>:<api_token>"` (an Atlassian API token from https://id.atlassian.com/manage-profile/security/api-tokens), sent as `Authorization: Basic ...` and never logged or echoed into an error. Only `https://*.atlassian.net` is accepted — refused before any request, so the token is never sent anywhere else even on a prompt-injected `repoUrl`. 401/403 map to a named auth error, 404 to `not_found`, 429 retries (bounded, jittered) honouring `Retry-After`.
+- No new dependency. **No migration** — additive.
+
 ## 0.11.0 — 2026-10-18
 
 - **Breaking: `ReadFileResult` is now a discriminated union — `{kind:'found', content, sha}` or `{kind:'binary', mediaType, size, bytes}` — rather than always `{content, sha}`.** The `fs` and `github` adapters previously decoded every file as UTF-8 unconditionally: a PNG came back as `content`, its invalid byte sequences silently replaced by U+FFFD — garbled, with no signal anything had gone wrong. `readFile` now classifies the raw bytes first (never from a file extension or declared content-type) and returns `'binary'` — carrying `mediaType`, `size` and the raw `bytes` — for anything that is not text, instead of a lossy decode.
