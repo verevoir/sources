@@ -153,4 +153,93 @@ describe('storageToMarkdown', () => {
     expect(out.split('\n')[0]).toBe('```jsevil');
     expect(out).toContain('safe body');
   });
+
+  it('decodes an entity-escaped href — a literal & must be &amp; in well-formed XML', () => {
+    expect(
+      storageToMarkdown('<p><a href="https://example.com/x?a=1&amp;b=2">here</a></p>')
+    ).toBe('[here](https://example.com/x?a=1&b=2)\n');
+  });
+
+  it('rejects a tab-obfuscated javascript: scheme — control characters are stripped before the scheme check', () => {
+    expect(storageToMarkdown('<p><a href="java\tscript:alert(1)">click</a></p>')).toBe(
+      'click\n'
+    );
+  });
+
+  it('rejects an entity-encoded javascript: scheme — numeric references are decoded before the scheme check', () => {
+    const encoded = 'javascript:alert(1)'
+      .split('')
+      .map((c) => `&#${c.codePointAt(0)};`)
+      .join('');
+    expect(storageToMarkdown(`<p><a href="${encoded}">click</a></p>`)).toBe('click\n');
+  });
+
+  it('rejects a protocol-relative URL ("//host/...") rather than treating it as a safe relative link', () => {
+    expect(storageToMarkdown('<p><a href="//evil.example/x">click</a></p>')).toBe('click\n');
+  });
+
+  it('wraps a link destination containing an unescaped paren in angle brackets', () => {
+    expect(storageToMarkdown('<p><a href="https://example.com/a)b">x</a></p>')).toBe(
+      '[x](<https://example.com/a)b>)\n'
+    );
+  });
+
+  it('treats a single-quoted href as absent (fails safe) — the parser only recognises double-quoted attributes', () => {
+    expect(storageToMarkdown("<p><a href='https://example.com'>text</a></p>")).toBe('text\n');
+  });
+
+  it('escapes markdown link syntax forged through a link label, even when the href itself is safe', () => {
+    const label = 'x](javascript:alert(1)';
+    const xhtml = `<p>See <a href="https://safe.example">${label}</a> ok</p>`;
+    const ESCAPE_CHARS = '\\`[]()!';
+    const escapedLabel = label
+      .split('')
+      .map((c) => (ESCAPE_CHARS.includes(c) ? `\\${c}` : c))
+      .join('');
+    expect(storageToMarkdown(xhtml)).toBe(`See [${escapedLabel}](https://safe.example) ok\n`);
+  });
+
+  it('escapes markdown link syntax appearing in plain prose, not just inside a real <a> tag', () => {
+    const text = 'Click [here](javascript:alert(1)) to win';
+    const ESCAPE_CHARS = '\\`[]()!';
+    const escaped = text
+      .split('')
+      .map((c) => (ESCAPE_CHARS.includes(c) ? `\\${c}` : c))
+      .join('');
+    expect(storageToMarkdown(`<p>${text}</p>`)).toBe(`${escaped}\n`);
+  });
+
+  it('renders inline code literally, without escaping markdown metacharacters inside it', () => {
+    expect(storageToMarkdown('<p>Use <code>a[1](b)</code> here</p>')).toBe('Use `a[1](b)` here\n');
+  });
+
+  it('ignores a malformed/out-of-range numeric entity rather than throwing', () => {
+    expect(() => storageToMarkdown('<p>&#99999999;</p>')).not.toThrow();
+  });
+
+  it('decodes a decimal numeric entity', () => {
+    expect(storageToMarkdown('<p>&#65;</p>')).toBe('A\n');
+  });
+
+  it('decodes a hex numeric entity', () => {
+    expect(storageToMarkdown('<p>&#x41;</p>')).toBe('A\n');
+  });
+
+  it('falls back to "unknown" for a structured-macro with no ac:name', () => {
+    expect(storageToMarkdown('<ac:structured-macro></ac:structured-macro>')).toBe(
+      '[macro: unknown]\n'
+    );
+  });
+
+  it('caps rendering recursion depth, degrading to a safe placeholder rather than overflowing the stack', () => {
+    const depth = 1000; // far past the renderer's own depth cap
+    const xhtml = '<ul><li>'.repeat(depth) + 'x' + '</li></ul>'.repeat(depth);
+    expect(() => storageToMarkdown(xhtml)).not.toThrow();
+  });
+
+  it('truncates an oversized page body rather than rendering it in full', () => {
+    const huge = `<p>${'x'.repeat(2_500_000)}</p>`;
+    const out = storageToMarkdown(huge);
+    expect(out.length).toBeLessThan(huge.length);
+  });
 });

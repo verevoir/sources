@@ -34,6 +34,15 @@
 // operator setting but a fixed fact about Cloud. A URL off that host (a
 // lookalike domain, or plain http) is refused before any request, so the
 // token is never sent anywhere else — even on a prompt-injected `repoUrl`.
+// Every pagination link (`_links.next`) is re-checked against that same
+// origin on every hop, and a link this adapter cannot even PARSE as a URL
+// is refused by name rather than throwing a raw, unnamed TypeError.
+//
+// Response bodies are size-bounded (`confCall`'s `readBounded`): refused via
+// `Content-Length` when the server declares one past the cap, and via a
+// running byte count AS the body streams in otherwise — so neither an
+// honest nor a dishonest/missing `Content-Length` can make this adapter
+// buffer an unbounded response into memory.
 //
 // `ref` is accepted-but-ignored, like Notion — Confluence pages have no
 // branch concept. `getDefaultBranch` returns 'live' for the same reason.
@@ -65,6 +74,15 @@ const LIST_BUDGET_MS = 120_000;
 /** Cap on `getRepoTree`'s walk; past it the tree reports `truncated: true`,
  * matching the Notion adapter's own cap. */
 const DEFAULT_TREE_CAP = 5000;
+/** Cap on a single HTTP response body this adapter will buffer, enforced by
+ * `readBounded` below — generous for any real Confluence API response, but
+ * bounded so a malicious or malfunctioning response of unbounded size
+ * cannot exhaust memory. */
+const MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
+/** Cap on the response body read when it is only being used for a
+ * truncated (300-char) error detail — no reason to stream megabytes just
+ * to keep the first few hundred characters. */
+const MAX_ERROR_DETAIL_BYTES = 65_536;
 
 /** A page-fetch budget shared across every `confPages` call within one
  * top-level operation. Mutated in place as pages are spent. */
@@ -136,13 +154,68 @@ interface Envelope<T> {
   _links?: { next?: string };
 }
 
+/** Reads a `Response` body, refusing anything past `capBytes` rather than
+ * buffering an unbounded body into memory first. Checked TWICE: via
+ * `Content-Length` when the server supplies one (cheap — refuses before
+ * reading a single byte), AND by counting bytes AS they arrive (a missing
+ * or dishonest `Content-Length` cannot bypass the cap by under-reporting
+ * or omitting it). */
+async function readBounded(res: Response, path: string, capBytes: number): Promise<string> {
+  const declared = res.headers.get('content-length');
+  if (declared && Number(declared) > capBytes) {
+    throw new SourceApiError(
+      `GET ${path}: response too large (${declared} bytes, cap ${capBytes})`
+    );
+  }
+  if (!res.body) {
+    const text = await res.text();
+    if (text.length > capBytes) {
+      throw new SourceApiError(`GET ${path}: response too large (cap ${capBytes} bytes)`);
+    }
+    return text;
+  }
+  const reader = res.body.getReader();
+  let received = 0;
+  const chunks: Uint8Array[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      received += value.byteLength;
+      if (received > capBytes) {
+        await reader.cancel().catch(() => {});
+        throw new SourceApiError(`GET ${path}: response too large (cap ${capBytes} bytes)`);
+      }
+      chunks.push(value);
+    }
+  }
+  const combined = new Uint8Array(received);
+  let offset = 0;
+  for (const c of chunks) {
+    combined.set(c, offset);
+    offset += c.byteLength;
+  }
+  return new TextDecoder('utf-8').decode(combined);
+}
+
 /** One place for headers + status mapping. `path` is relative to `site`
  * (e.g. `/wiki/api/v2/...`) or an absolute URL (a `_links.next` page) that
- * must share `site`'s origin — the token is never sent anywhere else. */
+ * must share `site`'s origin — the token is never sent anywhere else. A
+ * `_links.next` value this adapter cannot even parse as a URL (Confluence
+ * is trusted, but a pagination link is still external input) is refused by
+ * name, not left to throw a raw, unnamed TypeError out of `new URL(...)`. */
 async function confCall<T>(env: SourceEnv, site: string, path: string): Promise<T> {
   const url = /^https?:\/\//i.test(path) ? path : `${site}${path}`;
-  if (new URL(url).origin !== new URL(site).origin) {
-    throw new SourceApiError(`Refusing cross-origin Confluence request to ${new URL(url).origin}`);
+  let origin: string;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    throw new SourceApiError(
+      `Confluence returned an unparseable pagination link: ${path.slice(0, 200)}`
+    );
+  }
+  if (origin !== new URL(site).origin) {
+    throw new SourceApiError(`Refusing cross-origin Confluence request to ${origin}`);
   }
   const headers: Record<string, string> = {
     Accept: 'application/json',
@@ -162,20 +235,23 @@ async function confCall<T>(env: SourceEnv, site: string, path: string): Promise<
     await new Promise((r) => setTimeout(r, retryDelay(res, attempt)));
   }
   if (!res.ok) {
-    const detail = await res.text().catch(() => '');
+    const detail = await readBounded(res, path, MAX_ERROR_DETAIL_BYTES)
+      .then((t) => t.slice(0, 300))
+      .catch(() => '');
     if (res.status === 401 || res.status === 403) {
       throw new SourceApiError(
         `Confluence auth failed (${res.status}): check the token is "email:api_token" and has access to this space`,
         res.status,
-        detail.slice(0, 300)
+        detail
       );
     }
     if (res.status === 404) {
-      throw new SourceApiError('not_found', 404, detail.slice(0, 300));
+      throw new SourceApiError('not_found', 404, detail);
     }
-    throw new SourceApiError(`GET ${path}: ${res.status}`, res.status, detail.slice(0, 300));
+    throw new SourceApiError(`GET ${path}: ${res.status}`, res.status, detail);
   }
-  return (await res.json()) as T;
+  const text = await readBounded(res, path, MAX_RESPONSE_BYTES);
+  return JSON.parse(text) as T;
 }
 
 /** Follows `_links.next` (origin-pinned by `confCall`) until it runs out, or

@@ -1,10 +1,11 @@
 // @verevoir/sources — contract module
 //
-// A `SourceAdapter` is a thin client over a file source. Four ship
+// A `SourceAdapter` is a thin client over a file source. Five ship
 // today — GitHub (`@verevoir/sources/github`), GitLab
-// (`@verevoir/sources/gitlab`), local filesystem (`/fs`) and Notion
-// (`/notion`); Bitbucket, S3, plain-git, zip implementations follow
-// under the same contract.
+// (`@verevoir/sources/gitlab`), local filesystem (`/fs`), Notion
+// (`/notion`) and Confluence (`/confluence`, read-only — it implements
+// only the read half of this contract); Bitbucket, S3, plain-git, zip
+// implementations follow under the same contract.
 //
 // Adapters expose individual functions taking `(env, ...args)` rather
 // than a class. The env carries the auth token + the org we fork into

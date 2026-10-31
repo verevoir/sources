@@ -16,16 +16,34 @@
 //
 // This module's input is attacker-controlled — written by anyone who can
 // edit the page, not just the holder of the API token this adapter's own
-// index.ts guards so carefully — so two conversion boundaries are treated
-// as untrusted rather than passed through verbatim:
-//   - a link's `href` is allow-listed to http:, https:, mailto: and any
-//     relative / same-document link; anything else (javascript:, data:,
-//     ...) renders as plain label text, never a clickable destination.
+// index.ts guards so carefully — so every conversion boundary is treated as
+// untrusted rather than passed through verbatim:
+//   - a link's `href` is decoded (entities, including numeric references),
+//     stripped of control characters and whitespace, and THEN allow-listed
+//     to http:, https:, mailto: and a link that is clearly relative /
+//     same-document (never a protocol-relative `//host/...`); anything else
+//     (javascript:, data:, a control-character- or entity-obfuscated
+//     scheme, ...) renders as plain label text, never a clickable
+//     destination. A destination containing a character that would break
+//     the `(...)` syntax (a space, paren or angle bracket) is wrapped in
+//     angle brackets, CommonMark's own escape for exactly that.
+//   - every other piece of rendered TEXT (headings, paragraphs, list items,
+//     table cells, link labels) has CommonMark's own link/image/code
+//     metacharacters (`\`, `` ` ``, `[`, `]`, `(`, `)`, `!`) escaped, so
+//     page content cannot forge its own markdown link — through a label,
+//     or through plain prose that was never inside a real `<a>` tag at all.
+//     A code span or fenced block's own content stays literal by design
+//     (guarded instead by fence sizing, below), since escaping inside code
+//     would corrupt it.
 //   - a fenced code block's own fence (the `code` macro, and a bare `pre`)
 //     is sized longer than the longest run of backticks already present in
 //     the body, and a macro's `language` parameter is stripped to
 //     `[A-Za-z0-9_+-]` — so neither the body nor the language can break out
 //     of its own fence into the surrounding Markdown.
+//   - the renderer's own recursion (nested lists, nested inline tags) is
+//     depth-capped, and the whole input is length-capped — both degrade to
+//     a safe placeholder rather than overflowing the call stack or doing
+//     unbounded work on a pathological body.
 
 interface ElNode {
   kind: 'el';
@@ -49,11 +67,34 @@ function isEl(n: Node): n is ElNode {
 
 const VOID_TAGS = new Set(['br', 'hr']);
 
+/** Hard cap on the XHTML body this converter will attempt to render. Past
+ * it, the body is truncated and a note appended — a bounded, safe result
+ * rather than unbounded work on an oversized page. This is independent of
+ * (and in addition to) the response-size cap on the HTTP layer in
+ * index.ts's confCall, which bounds what gets buffered off the wire before
+ * it ever reaches this function. */
+const MAX_XHTML_LENGTH = 2_000_000;
+
+/** Hard cap on recursive descent through the parsed tree (nested lists,
+ * nested inline tags, ...). Real Confluence content never nests anywhere
+ * near this deep; a page body crafted to nest past it degrades to a
+ * placeholder instead of risking a stack overflow. */
+const MAX_RENDER_DEPTH = 200;
+
+function tooDeep(depth: number): boolean {
+  return depth > MAX_RENDER_DEPTH;
+}
+
+const DEPTH_PLACEHOLDER = '[content too deeply nested]';
+
 /** Tokenizes `xhtml` and parses it into a synthetic root element's children.
  * CDATA sections (macro bodies, typically) are captured as literal text,
  * never scanned for tags. Comments are dropped. An unmatched closing tag is
  * ignored rather than throwing — storage format from a real page is assumed
- * well-formed, and a converter should degrade, not crash, on the rest. */
+ * well-formed, and a converter should degrade, not crash, on the rest. This
+ * is an explicit stack (not recursive), so an adversarially deep or wide
+ * input cannot overflow the parser itself — only the RENDERER below, which
+ * is depth-capped separately. */
 function parse(xhtml: string): Node[] {
   const root: ElNode = { kind: 'el', tag: '#root', attrs: {}, children: [] };
   const stack: ElNode[] = [root];
@@ -97,69 +138,155 @@ function parse(xhtml: string): Node[] {
   return root.children;
 }
 
+/** Converts an integer code point to a character, refusing anything
+ * `String.fromCodePoint` itself would throw a `RangeError` on (negative,
+ * non-finite, or past U+10FFFF) — an attacker-supplied numeric entity like
+ * `&#99999999;` must degrade to nothing, not crash the converter. */
+function safeCodePoint(n: number): string {
+  if (!Number.isFinite(n) || n < 0 || n > 0x10ffff) return '';
+  try {
+    return String.fromCodePoint(n);
+  } catch {
+    return '';
+  }
+}
+
+/** Decodes the named XML entities storage format actually uses, plus
+ * decimal (`&#NN;`) and hex (`&#xNN;`) numeric character references — the
+ * generic form an attacker can use to spell any of the named ones (or a
+ * URL scheme) without the literal characters appearing anywhere in the
+ * source text. `&amp;` is decoded LAST so `&amp;lt;` degrades to the
+ * literal text `&lt;`, not `<`. */
 function decodeEntities(s: string): string {
   return s
+    .replace(/&#x([0-9a-fA-F]+);/g, (_m, hex: string) => safeCodePoint(parseInt(hex, 16)))
+    .replace(/&#([0-9]+);/g, (_m, dec: string) => safeCodePoint(parseInt(dec, 10)))
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
     .replace(/&apos;/g, "'")
     .replace(/&amp;/g, '&');
 }
 
+/** CommonMark characters that could forge markdown structure out of
+ * ordinary text: link/image syntax (`[`, `]`, `(`, `)`, `!`), a code span
+ * or fence (`` ` ``), or an escape sequence itself (`\`). A plain
+ * character-membership check rather than a regex character class, so
+ * there is no bracket-escaping subtlety to get wrong. */
+const MARKDOWN_ESCAPE_CHARS = '\\`[]()!';
+
+/** Escapes `MARKDOWN_ESCAPE_CHARS` out of rendered TEXT (headings,
+ * paragraphs, list items, table cells, link labels) so page content cannot
+ * forge its own markdown link or emphasis — through a label, or through
+ * plain prose that was never inside a real `<a>` tag at all. Never applied
+ * to a code span's or fenced block's own content (stays literal by
+ * design), nor to a link's `href` destination (a URL, not prose). */
+function escapeMarkdown(s: string): string {
+  let out = '';
+  for (const ch of s) out += MARKDOWN_ESCAPE_CHARS.includes(ch) ? `\\${ch}` : ch;
+  return out;
+}
+
 /** Concatenates every descendant text node, decoding entities except in a
  * CDATA-sourced node (`raw: true`), which stays byte-for-byte literal. Used
- * for `pre` (ordinary entity-escaped text) and a macro's plain-text body
- * (always CDATA in real storage format, so unaffected by the decode). */
-function textContent(n: Node): string {
+ * for `pre`, inline `<code>` (ordinary entity-escaped text, kept literal —
+ * never markdown-escaped) and a macro's plain-text body (always CDATA in
+ * real storage format, so unaffected by the decode). Depth-capped like
+ * every other recursive descent in this module. */
+function textContent(n: Node, depth: number): string {
   if (!isEl(n)) return n.raw ? n.text : decodeEntities(n.text);
-  return n.children.map(textContent).join('');
+  if (tooDeep(depth)) return '';
+  return n.children.map((c) => textContent(c, depth + 1)).join('');
 }
 
-/** Schemes a rendered link may point at. Anything else — `javascript:`,
- * `data:`, `vbscript:`, ... — renders as plain label text instead of a
- * clickable destination; a relative or same-document link (no scheme at
- * all) is always allowed. */
-const SAFE_LINK_SCHEME_RE = /^(https?|mailto):/i;
-const URL_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+/** Decodes entities in a raw attribute value, then strips ASCII control
+ * characters and whitespace — so neither an entity-encoded scheme
+ * (`&#106;avascript:`) nor a control-character-obfuscated one
+ * (`java\tscript:`) survives to reach the scheme check below. */
+function normalizeHref(raw: string): string {
+  return decodeEntities(raw).replace(/[\s\x00-\x1f\x7f]/g, '');
+}
 
+function firstIndexOfAny(s: string, chars: string[]): number {
+  let min = -1;
+  for (const c of chars) {
+    const i = s.indexOf(c);
+    if (i !== -1 && (min === -1 || i < min)) min = i;
+  }
+  return min;
+}
+
+/** True only for: an explicit `http:`/`https:`/`mailto:` scheme
+ * (case-insensitive); or a link that is clearly relative/same-document —
+ * starting with `/` (but NOT `//`, a protocol-relative absolute URL that
+ * silently inherits whatever scheme the current page loaded over), `#`,
+ * `./` or `../`, or containing no `:` before its first `/`, `?` or `#` (so
+ * a query string's own `:` — `page?x=1:2` — is never mistaken for a scheme
+ * separator). Everything else — `javascript:`, `data:`, `vbscript:`,
+ * `tel:`, ... — is rejected. `href` MUST already be normalised
+ * (`normalizeHref`) before this is called; it does not decode or strip
+ * anything itself. */
 function isSafeHref(href: string): boolean {
   if (!href) return false;
-  if (!URL_SCHEME_RE.test(href)) return true; // relative / same-document — no scheme
-  return SAFE_LINK_SCHEME_RE.test(href);
+  const lower = href.toLowerCase();
+  if (lower.startsWith('http:') || lower.startsWith('https:') || lower.startsWith('mailto:')) {
+    return true;
+  }
+  if (href.startsWith('//')) return false; // protocol-relative — not "relative"
+  if (
+    href.startsWith('/') ||
+    href.startsWith('#') ||
+    href.startsWith('./') ||
+    href.startsWith('../')
+  ) {
+    return true;
+  }
+  const colonIdx = href.indexOf(':');
+  if (colonIdx === -1) return true;
+  const specialIdx = firstIndexOfAny(href, ['/', '?', '#']);
+  return specialIdx !== -1 && colonIdx > specialIdx;
 }
 
-function renderInline(nodes: Node[]): string {
-  return nodes.map(renderInlineNode).join('');
+/** Wraps a link destination in angle brackets — CommonMark's own escape —
+ * when it contains a character (space, paren, angle bracket) that would
+ * otherwise prematurely close the `(...)` destination syntax. */
+function formatHref(href: string): string {
+  return /[\s()<>]/.test(href) ? `<${href}>` : href;
 }
 
-function renderInlineNode(n: Node): string {
-  if (!isEl(n)) return decodeEntities(n.text);
+function renderInline(nodes: Node[], depth: number): string {
+  if (tooDeep(depth)) return DEPTH_PLACEHOLDER;
+  return nodes.map((n) => renderInlineNode(n, depth)).join('');
+}
+
+function renderInlineNode(n: Node, depth: number): string {
+  if (!isEl(n)) return escapeMarkdown(decodeEntities(n.text));
   switch (n.tag) {
     case 'br':
       return '\n';
     case 'a': {
-      const href = n.attrs.href ?? '';
-      const label = renderInline(n.children).trim();
-      if (href && isSafeHref(href)) return `[${label || href}](${href})`;
+      const href = normalizeHref(n.attrs.href ?? '');
+      const label = escapeMarkdown(renderInline(n.children, depth + 1).trim());
+      if (href && isSafeHref(href)) return `[${label || href}](${formatHref(href)})`;
       return label;
     }
     case 'strong':
     case 'b':
-      return `**${renderInline(n.children)}**`;
+      return `**${renderInline(n.children, depth + 1)}**`;
     case 'em':
     case 'i':
-      return `*${renderInline(n.children)}*`;
+      return `*${renderInline(n.children, depth + 1)}*`;
     case 'code':
-      return `\`${renderInline(n.children)}\``;
+      return `\`${textContent(n, depth + 1)}\``;
     case 'ac:structured-macro':
       return macroPlaceholder(n);
     default:
-      return renderInline(n.children);
+      return renderInline(n.children, depth + 1);
   }
 }
 
-function renderList(n: ElNode, kind: 'ul' | 'ol', depth: number): string {
+function renderList(n: ElNode, kind: 'ul' | 'ol', indent: number, depth: number): string {
+  if (tooDeep(depth)) return DEPTH_PLACEHOLDER;
   const items = n.children.filter((c): c is ElNode => isEl(c) && c.tag === 'li');
   const lines: string[] = [];
   let i = 0;
@@ -172,16 +299,17 @@ function renderList(n: ElNode, kind: 'ul' | 'ol', depth: number): string {
     const inlineChildren = li.children.filter(
       (c) => !(isEl(c) && (c.tag === 'ul' || c.tag === 'ol'))
     );
-    const text = renderInline(inlineChildren).trim();
-    lines.push(`${'  '.repeat(depth)}${marker} ${text}`);
+    const text = renderInline(inlineChildren, depth + 1).trim();
+    lines.push(`${'  '.repeat(indent)}${marker} ${text}`);
     for (const nested of nestedLists) {
-      lines.push(renderList(nested, nested.tag as 'ul' | 'ol', depth + 1));
+      lines.push(renderList(nested, nested.tag as 'ul' | 'ol', indent + 1, depth + 1));
     }
   }
   return lines.join('\n');
 }
 
-function renderTable(n: ElNode): string {
+function renderTable(n: ElNode, depth: number): string {
+  if (tooDeep(depth)) return DEPTH_PLACEHOLDER;
   const tbody = n.children.find((c): c is ElNode => isEl(c) && c.tag === 'tbody');
   const host = tbody ?? n;
   const rows = host.children.filter((c): c is ElNode => isEl(c) && c.tag === 'tr');
@@ -189,7 +317,7 @@ function renderTable(n: ElNode): string {
   const cellsOf = (row: ElNode): ElNode[] =>
     row.children.filter((c): c is ElNode => isEl(c) && (c.tag === 'td' || c.tag === 'th'));
   const renderCell = (c: ElNode): string => {
-    const text = renderInline(c.children).trim();
+    const text = renderInline(c.children, depth + 1).trim();
     return text.replace(/\|/g, '\\|').replace(/\s*\n+\s*/g, ' ');
   };
   const renderRow = (cells: ElNode[]): string => `| ${cells.map(renderCell).join(' | ')} |`;
@@ -199,26 +327,29 @@ function renderTable(n: ElNode): string {
   return `${lines.join('\n')}\n`;
 }
 
+/** `ac:name` is itself an attacker-controlled attribute value — decoded the
+ * same way `href` is, before it ever reaches the placeholder or the
+ * `=== 'code'` comparison. */
 function macroName(n: ElNode): string {
-  return n.attrs['ac:name'] ?? 'unknown';
+  return decodeEntities(n.attrs['ac:name'] ?? 'unknown');
 }
 
 function macroPlaceholder(n: ElNode): string {
-  return `[macro: ${macroName(n)}]`;
+  return `[macro: ${escapeMarkdown(macroName(n))}]`;
 }
 
-function macroParam(n: ElNode, name: string): string | undefined {
+function macroParam(n: ElNode, name: string, depth: number): string | undefined {
   for (const c of n.children) {
     if (isEl(c) && c.tag === 'ac:parameter' && c.attrs['ac:name'] === name) {
-      return renderInline(c.children).trim();
+      return renderInline(c.children, depth + 1).trim();
     }
   }
   return undefined;
 }
 
-function macroPlainTextBody(n: ElNode): string | undefined {
+function macroPlainTextBody(n: ElNode, depth: number): string | undefined {
   for (const c of n.children) {
-    if (isEl(c) && c.tag === 'ac:plain-text-body') return textContent(c);
+    if (isEl(c) && c.tag === 'ac:plain-text-body') return textContent(c, depth + 1);
   }
   return undefined;
 }
@@ -240,23 +371,24 @@ function sanitizeLang(lang: string): string {
   return lang.replace(/[^A-Za-z0-9_+-]/g, '');
 }
 
-function renderMacroBlock(n: ElNode): string {
+function renderMacroBlock(n: ElNode, depth: number): string {
   if (macroName(n) === 'code') {
-    const lang = sanitizeLang(macroParam(n, 'language') ?? '');
-    const body = (macroPlainTextBody(n) ?? '').replace(/\n+$/, '');
+    const lang = sanitizeLang(macroParam(n, 'language', depth) ?? '');
+    const body = (macroPlainTextBody(n, depth) ?? '').replace(/\n+$/, '');
     const fence = fenceFor(body);
     return `${fence}${lang}\n${body}\n${fence}\n\n`;
   }
   return `${macroPlaceholder(n)}\n\n`;
 }
 
-function renderBlocks(nodes: Node[]): string {
-  return nodes.map(renderBlock).join('');
+function renderBlocks(nodes: Node[], depth: number): string {
+  if (tooDeep(depth)) return `${DEPTH_PLACEHOLDER}\n\n`;
+  return nodes.map((n) => renderBlock(n, depth)).join('');
 }
 
-function renderBlock(n: Node): string {
+function renderBlock(n: Node, depth: number): string {
   if (!isEl(n)) {
-    const t = decodeEntities(n.text).trim();
+    const t = escapeMarkdown(decodeEntities(n.text)).trim();
     return t ? `${t}\n\n` : '';
   }
   switch (n.tag) {
@@ -266,36 +398,42 @@ function renderBlock(n: Node): string {
     case 'h4':
     case 'h5':
     case 'h6':
-      return `${'#'.repeat(Number(n.tag[1]))} ${renderInline(n.children).trim()}\n\n`;
+      return `${'#'.repeat(Number(n.tag[1]))} ${renderInline(n.children, depth + 1).trim()}\n\n`;
     case 'p': {
-      const text = renderInline(n.children).trim();
+      const text = renderInline(n.children, depth + 1).trim();
       return text ? `${text}\n\n` : '';
     }
     case 'ul':
     case 'ol':
-      return `${renderList(n, n.tag, 0)}\n\n`;
+      return `${renderList(n, n.tag, 0, depth + 1)}\n\n`;
     case 'table':
-      return `${renderTable(n)}\n`;
+      return `${renderTable(n, depth + 1)}\n`;
     case 'pre': {
-      const body = textContent(n).trim();
+      const body = textContent(n, depth + 1).trim();
       const fence = fenceFor(body);
       return `${fence}\n${body}\n${fence}\n\n`;
     }
     case 'hr':
       return '---\n\n';
     case 'ac:structured-macro':
-      return renderMacroBlock(n);
+      return renderMacroBlock(n, depth);
     default:
-      return renderBlocks(n.children);
+      return renderBlocks(n.children, depth + 1);
   }
 }
 
 /** Converts a Confluence storage-format XHTML body to Markdown. Empty input
  * converts to an empty string; everything else ends with exactly one
- * trailing newline, and runs of 3+ blank lines collapse to one. */
+ * trailing newline, and runs of 3+ blank lines collapse to one. An input
+ * past `MAX_XHTML_LENGTH` is truncated with a note appended rather than
+ * rendered in full. */
 export function storageToMarkdown(xhtml: string): string {
   if (!xhtml) return '';
-  const rendered = renderBlocks(parse(xhtml))
+  const input =
+    xhtml.length > MAX_XHTML_LENGTH
+      ? `${xhtml.slice(0, MAX_XHTML_LENGTH)}<p>[page body truncated: exceeded ${MAX_XHTML_LENGTH} characters]</p>`
+      : xhtml;
+  const rendered = renderBlocks(parse(input), 0)
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   return rendered ? `${rendered}\n` : '';

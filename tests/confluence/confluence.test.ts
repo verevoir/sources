@@ -72,6 +72,12 @@ describe('parseConfluenceSpaceUrl', () => {
   it('rejects a URL with no space path', () => {
     expect(() => parseConfluenceSpaceUrl(SITE)).toThrow(/Confluence Cloud space URL/);
   });
+
+  it('rejects an unparseable URL string', () => {
+    expect(() => parseConfluenceSpaceUrl('not a url at all')).toThrow(
+      /Cannot parse Confluence space URL/
+    );
+  });
 });
 
 describe('confluence adapter — reads', () => {
@@ -394,6 +400,69 @@ describe('confluence adapter — rate limiting', () => {
     expect(calls).toHaveLength(1);
     await expect(settle(p)).resolves.toMatchObject({ content: 'ok\n' });
     expect(calls).toHaveLength(2);
+  });
+});
+
+describe('confluence adapter — page budget, wall-clock half', () => {
+  it('treats the wall-clock budget as exhausted, not just the page count', async () => {
+    vi.useFakeTimers();
+    const calls = stubFetch([
+      ['/wiki/api/v2/spaces?keys=ENG', () => [200, { results: [{ id: 's1' }] }]],
+      [
+        '/wiki/api/v2/spaces/s1/pages?limit=100',
+        () => {
+          // Push the clock past LIST_BUDGET_MS before the loop re-checks
+          // its deadline for the next page — proving the TIME half of the
+          // shared PageBudget, not just its page-count half, stops a walk.
+          vi.advanceTimersByTime(121_000);
+          return [
+            200,
+            {
+              results: [{ id: '1', title: 'A', version: { number: 1 } }],
+              _links: { next: '/wiki/api/v2/spaces/s1/pages?cursor=x&limit=100' },
+            },
+          ];
+        },
+      ],
+      [
+        '/wiki/api/v2/spaces/s1/pages?cursor=x',
+        () => [200, { results: [{ id: '2', title: 'B', version: { number: 1 } }], _links: {} }],
+      ],
+    ]);
+    const entries = await confluence.listFiles(ENV, SPACE_URL, '');
+    expect(entries).toHaveLength(1);
+    expect(calls).toHaveLength(2); // spaces + the first page — the cursor page is never fetched
+  });
+});
+
+describe('confluence adapter — oversized / malformed pagination', () => {
+  it('refuses an oversized response (declared via Content-Length) with a named error', async () => {
+    stubFetch([
+      [
+        '/wiki/api/v2/pages/1?body-format=storage',
+        () => [200, { id: '1' }, { 'content-length': String(20 * 1024 * 1024 + 1) }],
+      ],
+    ]);
+    await expect(confluence.readFile(ENV, SPACE_URL, '1')).rejects.toThrow(/too large/);
+  });
+
+  it('names an unparseable pagination link rather than throwing a raw TypeError', async () => {
+    stubFetch([
+      ['/wiki/api/v2/spaces?keys=ENG', () => [200, { results: [{ id: 's1' }] }]],
+      [
+        '/wiki/api/v2/spaces/s1/pages?limit=100',
+        () => [
+          200,
+          {
+            results: [{ id: '1', title: 'A', version: { number: 1 } }],
+            _links: { next: 'http://[::1' },
+          },
+        ],
+      ],
+    ]);
+    await expect(confluence.listFiles(ENV, SPACE_URL, '')).rejects.toThrow(
+      /unparseable pagination link/
+    );
   });
 });
 
