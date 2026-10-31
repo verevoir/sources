@@ -1,8 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  storageToMarkdown,
-  _parseStepsForTest,
-} from '../../src/confluence/storage-to-markdown.js';
+import { storageToMarkdown, _parseStepsForTest } from '../../src/confluence/storage-to-markdown.js';
 
 describe('storageToMarkdown', () => {
   it('renders headings', () => {
