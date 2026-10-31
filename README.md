@@ -174,13 +174,14 @@ const space = 'https://acme.atlassian.net/wiki/spaces/ENG';
 // Root-level pages of the space.
 const pages = await listFiles(env, space, '');
 
-// A page's body, converted from Confluence's storage-format XHTML to Markdown.
+// A page's body, converted from Confluence's storage-format XHTML to Markdown. Headings, lists,
+// tables, links and code blocks are preserved; an unrenderable macro becomes a named
+// `[macro: <name>]` placeholder rather than being silently dropped.
 const page = await readFile(env, space, pages[0].path);
-console.log(page.content); // headings, lists, tables, links and code blocks preserved;
-                            // an unrenderable macro becomes a named `[macro: <name>]` placeholder
-                            // rather than being silently dropped.
+console.log(page.content);
 
-await getDefaultBranch(env, space); // 'live' — Confluence has no branch concept, like Notion.
+// 'live' — Confluence has no branch concept, like Notion.
+await getDefaultBranch(env, space);
 ```
 
 Only `https://*.atlassian.net` is accepted — refused before any request, so the token is never
