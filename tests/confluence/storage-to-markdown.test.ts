@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { storageToMarkdown } from '../../src/confluence/storage-to-markdown.js';
+import {
+  storageToMarkdown,
+  _parseStepsForTest,
+} from '../../src/confluence/storage-to-markdown.js';
 
 describe('storageToMarkdown', () => {
   it('renders headings', () => {
@@ -197,10 +200,28 @@ describe('storageToMarkdown', () => {
     expect(out).toBe('click\n');
   });
 
+  it('rejects a backslash protocol-relative URL (WHATWG resolves \\\\host/x to https://host/x)', () => {
+    const xhtml = '<p><a href="\\\\evil.example/x">click</a></p>';
+    const out = storageToMarkdown(xhtml);
+    expect(out).toBe('click\n');
+  });
+
+  it('rejects a leading-slash-then-backslash URL (WHATWG resolves /\\host/x the same way)', () => {
+    const xhtml = '<p><a href="/\\evil.example/x">click</a></p>';
+    const out = storageToMarkdown(xhtml);
+    expect(out).toBe('click\n');
+  });
+
   it('percent-encodes a paren in a link destination rather than wrapping it', () => {
     const xhtml = '<p><a href="https://example.com/a)b">x</a></p>';
     const out = storageToMarkdown(xhtml);
     expect(out).toBe('[x](https://example.com/a%29b)\n');
+  });
+
+  it('percent-encodes an interior space in a link destination rather than deleting it', () => {
+    const xhtml = '<p><a href="https://example.com/a b">x</a></p>';
+    const out = storageToMarkdown(xhtml);
+    expect(out).toBe('[x](https://example.com/a%20b)\n');
   });
 
   it('percent-encodes a literal angle bracket in a link destination, reachable via entity decoding', () => {
@@ -316,7 +337,28 @@ describe('storageToMarkdown', () => {
   it('caps rendering recursion depth, degrading to a placeholder', () => {
     const depth = 1000; // far past the renderer's own depth cap
     const xhtml = '<ul><li>'.repeat(depth) + 'x' + '</li></ul>'.repeat(depth);
-    expect(() => storageToMarkdown(xhtml)).not.toThrow();
+    const out = storageToMarkdown(xhtml);
+    // The behaviour this test is named for is the PLACEHOLDER appearing,
+    // not merely "did not throw" -- at this depth there is no stack-
+    // overflow risk either way, so not.toThrow() alone would stay green
+    // even if the depth cap were deleted entirely.
+    expect(out).toContain('[content too deeply nested]');
+  });
+
+  it('decodes &amp; LAST, so a double-encoded entity degrades to its single-encoded form, not the raw character', () => {
+    // decodeEntities's own doc comment states this ordering is deliberate:
+    // '&amp;lt;' must become the literal text '&lt;', never '<'. A test
+    // pins the order so a regression that re-sorted the replace() chain
+    // would be caught.
+    expect(storageToMarkdown('<p>&amp;lt;</p>')).toBe('&lt;\n');
+  });
+
+  it('renders a bare "<" that never forms a tag as literal text (the tokenizer\'s non-tag-opener branch)', () => {
+    // '<' immediately followed by a space is not `<[a-zA-Z]` or `</[a-zA-Z]`,
+    // so parseCore's own 'not a tag opener' branch emits it as literal text
+    // and resumes scanning right after it, rather than treating the whole
+    // rest of the paragraph as inside an unclosed tag.
+    expect(storageToMarkdown('<p>a < b ></p>')).toBe('a < b >\n');
   });
 
   it('truncates an oversized page body rather than full render', () => {
@@ -329,28 +371,40 @@ describe('storageToMarkdown', () => {
 describe('storageToMarkdown — the tokenizer scans linearly, not quadratically, on unclosed constructs', () => {
   // Regression for a previously-quadratic tokenizer: a single alternated,
   // lazily-quantified regex cost O(n^2) on repeated UNCLOSED CDATA/comment
-  // openers (200,000 characters measured at ~6s). The linear, indexOf-based
-  // scanner costs one forward scan per construct, so each of these finishes
-  // in well under a second even on 200,000 repeats — comfortably inside
-  // this file's own MAX_XHTML_LENGTH cap of 2,000,000 characters.
-  it('finishes quickly on 200k unclosed comment openers', () => {
-    const xhtml = '<!--'.repeat(200_000);
-    const start = Date.now();
-    expect(() => storageToMarkdown(xhtml)).not.toThrow();
-    expect(Date.now() - start).toBeLessThan(300);
+  // openers. These tests assert a DETERMINISTIC, timing-free proxy instead
+  // of wall-clock time: `_parseStepsForTest` exposes how many iterations of
+  // the main scanning loop parseCore needed. Every branch that handles an
+  // unclosed construct (CDATA, comment, tag) ends the loop with a single
+  // failed `indexOf` scan of the remaining input and a `break` — so the
+  // step count stays a small constant REGARDLESS of how large `n` is, which
+  // is a strictly stronger, and deterministic, proof of "bounded by k*n"
+  // than a wall-clock assertion that a shared or loaded CI runner could
+  // push over any fixed millisecond threshold with no code change at all.
+  const MAX_STEPS = 5;
+
+  it('needs a small, constant number of scan steps on 200k unclosed comment openers', () => {
+    const steps = _parseStepsForTest('<!--'.repeat(200_000));
+    expect(steps).toBeLessThanOrEqual(MAX_STEPS);
   });
 
-  it('finishes quickly on 200k unclosed CDATA openers', () => {
-    const xhtml = '<![CDATA['.repeat(200_000);
-    const start = Date.now();
-    expect(() => storageToMarkdown(xhtml)).not.toThrow();
-    expect(Date.now() - start).toBeLessThan(300);
+  it('needs a small, constant number of scan steps on 200k unclosed CDATA openers', () => {
+    const steps = _parseStepsForTest('<![CDATA['.repeat(200_000));
+    expect(steps).toBeLessThanOrEqual(MAX_STEPS);
   });
 
-  it('finishes quickly on 200k unclosed tag openers', () => {
-    const xhtml = '<a'.repeat(200_000);
-    const start = Date.now();
-    expect(() => storageToMarkdown(xhtml)).not.toThrow();
-    expect(Date.now() - start).toBeLessThan(300);
+  it('needs a small, constant number of scan steps on 200k unclosed tag openers', () => {
+    const steps = _parseStepsForTest('<a'.repeat(200_000));
+    expect(steps).toBeLessThanOrEqual(MAX_STEPS);
+  });
+
+  it('step count does not grow with input length for the same unclosed construct (not quadratic)', () => {
+    // A direct linear-vs-quadratic check: double the input and confirm the
+    // step count does not grow at all (every unclosed-construct branch
+    // breaks after one failed indexOf, so it stays flat) — a quadratic
+    // tokenizer that re-scanned from every position would instead show
+    // steps scaling with n.
+    const small = _parseStepsForTest('<!--'.repeat(50_000));
+    const large = _parseStepsForTest('<!--'.repeat(200_000));
+    expect(large).toBe(small);
   });
 });

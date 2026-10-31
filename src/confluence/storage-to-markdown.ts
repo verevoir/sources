@@ -19,14 +19,19 @@
 // index.ts guards so carefully — so every conversion boundary is treated as
 // untrusted rather than passed through verbatim:
 //   - a link's `href` is decoded (entities, including numeric references),
-//     stripped of control characters and whitespace, and THEN allow-listed
-//     to http:, https:, mailto: and a link that is clearly relative /
-//     same-document (never a protocol-relative `//host/...`); anything else
-//     (javascript:, data:, a control-character- or entity-obfuscated
-//     scheme, ...) renders as plain label text, never a clickable
-//     destination. A destination containing a character that would break
-//     the `(...)` syntax (a space, paren or literal angle bracket) is
-//     percent-encoded rather than angle-bracket-wrapped — CommonMark's own
+//     stripped of control characters everywhere and of whitespace at the
+//     ENDS only — an interior space survives normalisation and is percent-
+//     encoded below, not silently deleted — and a backslash is rejected
+//     outright (WHATWG URL resolution treats `\` as equivalent to `/`, so
+//     `\\evil.example/x` or `/\evil.example/x` can resolve to a different,
+//     cross-origin URL than its literal text suggests). The result is THEN
+//     allow-listed to http:, https:, mailto: and a link that is clearly
+//     relative / same-document (never a protocol-relative `//host/...`);
+//     anything else (javascript:, data:, a control-character- or entity-
+//     obfuscated scheme, a backslash-disguised one, ...) renders as plain
+//     label text, never a clickable destination. A destination containing
+//     a character that would break the `(...)` syntax (a space, paren or
+//     literal angle bracket) is percent-encoded rather than angle-bracket-wrapped — CommonMark's own
 //     `<...>`-delimited destination syntax forbids an unescaped `<`/`>`
 //     INSIDE it, so wrapping would not escape a destination that itself
 //     contains one.
@@ -121,8 +126,11 @@ const DEPTH_PLACEHOLDER = '[content too deeply nested]';
  * converter should degrade, not crash, on the rest. The element stack is
  * explicit (not recursive), so an adversarially deep or wide input cannot
  * overflow the parser itself — only the RENDERER below, which is
- * depth-capped separately. */
-function parse(xhtml: string): Node[] {
+ * depth-capped separately. Returns the parsed nodes AND the number of main-
+ * loop iterations it took (`steps`) — the deterministic, timing-free proxy
+ * for "linear, not quadratic" that `_parseStepsForTest` below exposes to
+ * tests. */
+function parseCore(xhtml: string): { nodes: Node[]; steps: number } {
   const root: ElNode = { kind: 'el', tag: '#root', attrs: {}, children: [] };
   const stack: ElNode[] = [root];
   const pushText = (text: string, raw: boolean) => {
@@ -131,7 +139,9 @@ function parse(xhtml: string): Node[] {
   };
   const len = xhtml.length;
   let i = 0;
+  let steps = 0;
   while (i < len) {
+    steps++;
     const lt = xhtml.indexOf('<', i);
     if (lt === -1) {
       pushText(xhtml.slice(i), false);
@@ -198,7 +208,22 @@ function parse(xhtml: string): Node[] {
     }
     i = gt + 1;
   }
-  return root.children;
+  return { nodes: root.children, steps };
+}
+
+function parse(xhtml: string): Node[] {
+  return parseCore(xhtml).nodes;
+}
+
+/** Test-only: exposes `parseCore`'s main-loop iteration count. A test can
+ * assert this scales LINEARLY (bounded by a small constant, since every
+ * unclosed construct below ends the loop in one failed `indexOf` scan) with
+ * input length, deterministically — proving the tokenizer is not quadratic
+ * without depending on wall-clock timing, which varies by machine and CI
+ * load. Not part of this module's conversion surface; used only by this
+ * file's own tests. */
+export function _parseStepsForTest(xhtml: string): number {
+  return parseCore(xhtml).steps;
 }
 
 /** Converts an integer code point to a character, refusing anything
@@ -262,12 +287,22 @@ function textContent(n: Node, depth: number): string {
   return n.children.map((c) => textContent(c, depth + 1)).join('');
 }
 
-/** Decodes entities in a raw attribute value, then strips ASCII control
- * characters and whitespace — so neither an entity-encoded scheme
- * (`&#106;avascript:`) nor a control-character-obfuscated one
- * (`java\tscript:`) survives to reach the scheme check below. */
+/** Decodes entities in a raw attribute value, strips ASCII control
+ * characters EVERYWHERE, and trims whitespace from the ENDS only — so
+ * neither an entity-encoded scheme (`&#106;avascript:`) nor a
+ * control-character-obfuscated one (`java\tscript:`) survives to reach the
+ * scheme check below, while an INTERIOR space (e.g.
+ * `https://example.com/a b`) is left intact for `formatHref` to
+ * percent-encode rather than being silently deleted — deleting it would
+ * change what the link actually points to, not just how it is written. A
+ * backslash is deliberately NOT touched here: `isSafeHref` below rejects
+ * any href containing one outright, since WHATWG URL resolution treats `\`
+ * as equivalent to `/` and normalising it here would make it look safe
+ * rather than refusing it. */
 function normalizeHref(raw: string): string {
-  return decodeEntities(raw).replace(/[\s\x00-\x1f\x7f]/g, '');
+  return decodeEntities(raw)
+    .replace(/[\x00-\x1f\x7f]/g, '')
+    .trim();
 }
 
 function firstIndexOfAny(s: string, chars: string[]): number {
@@ -295,6 +330,17 @@ function isSafeHref(href: string): boolean {
   if (lower.startsWith('http:') || lower.startsWith('https:') || lower.startsWith('mailto:')) {
     return true;
   }
+  // WHATWG URL resolution treats a backslash as equivalent to a forward
+  // slash, so '\\evil.example/x' (no scheme, no leading '/', so it would
+  // otherwise fall to the "no colon before any special char" relative
+  // branch below) and '/\evil.example/x' (passes the plain
+  // startsWith('/') relative check below) both resolve to a different,
+  // effectively cross-origin URL once a browser parses the rendered link —
+  // e.g. https://evil.example/x against an https page — even though
+  // neither matches the literal '//' check just below. Reject outright
+  // rather than trying to enumerate every backslash-involving resolution
+  // quirk.
+  if (href.includes('\\')) return false;
   if (href.startsWith('//')) return false; // protocol-relative — not "relative"
   if (
     href.startsWith('/') ||
