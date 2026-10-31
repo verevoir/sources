@@ -113,9 +113,7 @@ describe('storageToMarkdown', () => {
     const xhtml =
       '<table><tr><th>H</th></tr><tr><td>a|b</td></tr>' +
       '<tr><td>line one\nline two</td></tr></table>';
-    expect(storageToMarkdown(xhtml)).toBe(
-      '| H |\n| --- |\n| a\\|b |\n| line one line two |\n'
-    );
+    expect(storageToMarkdown(xhtml)).toBe('| H |\n| --- |\n| a\\|b |\n| line one line two |\n');
   });
 
   it('renders an empty string for a table with no rows', () => {
